@@ -1,0 +1,78 @@
+#pragma once
+
+#include <stdbool.h>
+
+#include "core.h"
+
+#define MMIO_DEVICE_RSV 64
+
+// DEVICE INFO
+
+#define DMA_CNTL_DO 1
+
+#define POWER_CNTL_SHUTDOWN 1
+#define POWER_CNTL_RESTART (1 << 1)
+
+#define CONSOLE_CNTL_INTERRUPT 1
+#define CONSOLE_CNTL_IN_BLOCK (1 << 1)
+
+// DEVICE ADDRESSES
+
+#define DMA0_BASE MMIO_BASE
+#define DMA0_DST_ADDR DMA0_BASE
+#define DMA0_SRC_ADDR (DMA0_BASE + 4)
+#define DMA0_DST_INC (DMA0_BASE + 8)
+#define DMA0_SRC_INC (DMA0_BASE + 12)
+#define DMA0_LEN (DMA0_BASE + 16)
+#define DMA0_TRANS_SIZE (DMA0_BASE + 20)
+#define DMA0_CNTL (DMA0_BASE + 24)
+#define DMA0_END (DMA0_BASE + 28)
+
+#define DMA1_BASE (MMIO_BASE + MMIO_DEVICE_RSV)
+#define DMA1_DST_ADDR DMA1_BASE
+#define DMA1_SRC_ADDR (DMA1_BASE + 4)
+#define DMA1_DST_INC (DMA1_BASE + 8)
+#define DMA1_SRC_INC (DMA1_BASE + 12)
+#define DMA1_LEN (DMA1_BASE + 16)
+#define DMA1_TRANS_SIZE (DMA1_BASE + 20)
+#define DMA1_CNTL (DMA1_BASE + 24)
+#define DMA1_END (DMA1_BASE + 28)
+
+#define DMA2_BASE (MMIO_BASE + MMIO_DEVICE_RSV * 2)
+#define DMA2_DST_ADDR DMA2_BASE
+#define DMA2_SRC_ADDR (DMA2_BASE + 4)
+#define DMA2_DST_INC (DMA2_BASE + 8)
+#define DMA2_SRC_INC (DMA2_BASE + 12)
+#define DMA2_LEN (DMA2_BASE + 16)
+#define DMA2_TRANS_SIZE (DMA2_BASE + 20)
+#define DMA2_CNTL (DMA2_BASE + 24)
+#define DMA2_END (DMA2_BASE + 28)
+
+#define DMA3_BASE (MMIO_BASE + MMIO_DEVICE_RSV * 3)
+#define DMA3_DST_ADDR DMA3_BASE
+#define DMA3_SRC_ADDR (DMA3_BASE + 4)
+#define DMA3_DST_INC (DMA3_BASE + 8)
+#define DMA3_SRC_INC (DMA3_BASE + 12)
+#define DMA3_LEN (DMA3_BASE + 16)
+#define DMA3_TRANS_SIZE (DMA3_BASE + 20)
+#define DMA3_CNTL (DMA3_BASE + 24)
+#define DMA3_END (DMA3_BASE + 28)
+
+#define POWER0_BASE (MMIO_BASE + MMIO_DEVICE_RSV * 4)
+#define POWER0_CNTL POWER0_BASE
+#define POWER0_END (POWER0_BASE + 4)
+
+#define CONSOLE0_BASE (MMIO_BASE + MMIO_DEVICE_RSV * 5)
+#define CONSOLE0_IN CONSOLE0_BASE
+#define CONSOLE0_OUT (CONSOLE0_BASE + 1)
+#define CONSOLE0_IN_SIZE (CONSOLE0_BASE + 2)
+#define CONSOLE0_BATCH_SIZE (CONSOLE0_BASE + 6)
+#define CONSOLE0_CNTL (CONSOLE0_BASE + 10)
+#define CONSOLE0_END (CONSOLE0_BASE + 14)
+
+#define RIC0_BASE (MMIO_BASE + MMIO_DEVICE_RSV * 6)
+#define RIC0_DEVADDR RIC0_BASE
+#define RIC0_END (RIC0_BASE + 4)
+
+bool mmio_read(u32 mmio_addr, int size, u32 *ret);
+bool mmio_write(u32 mmio_addr, int size, u32 value);
