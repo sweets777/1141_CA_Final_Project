@@ -2,6 +2,6 @@
 	path = ares/src/exec/ezld
 	url = https://github.com/Alessandro-Salerno/ezld
 
-[submodule "src/unity"]
-	path = src/unity
+[submodule "ares/src/unity"]
+	path = ares/src/unity
 	url = https://github.com/ThrowTheSwitch/Unity
