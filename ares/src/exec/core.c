@@ -8,7 +8,15 @@
 #include "ares/emulate.h"
 
 export Section *g_text, *g_data, *g_stack, *g_kernel_text, *g_kernel_data,
-    *g_mmio;
+    *g_mmio, *g_vga, *g_gif;
+
+export u32 g_vga_base_addr;
+export u32 g_vga_len;
+export u32 g_vga_ptr;
+export u32 g_gif_base_addr;
+export u32 g_gif_len;
+export u32 g_gif_ptr;
+export u32 g_gif_used;
 
 ARES_ARRAY(SectionPtr) g_sections = ARES_ARRAY_NEW(SectionPtr);
 ARES_ARRAY(Extern) g_externs = ARES_ARRAY_NEW(Extern);
@@ -2184,6 +2192,19 @@ static void prepare_default_syms(void) {
     MMIO_LABEL("_RIC0_END", RIC0_END);
 
 #undef MMIO_LABEL
+
+#define MEM_LABEL(name, addrr, secptr)                              \
+    *ARES_ARRAY_PUSH(&g_labels) = (LabelData){.txt = (name),       \
+                                                .len = strlen(name), \
+                                                .addr = (addrr),     \
+                                                .section = (secptr)}
+
+    MEM_LABEL("_VGA_BASE", VGA_BASE, g_vga);
+    MEM_LABEL("_VGA_END", VGA_END, g_vga);
+    MEM_LABEL("_GIF_BASE", GIF_BASE, g_gif);
+    MEM_LABEL("_GIF_END", GIF_END, g_gif);
+
+#undef MEM_LABEL
 }
 
 export void assemble(const char *txt, size_t s, bool allow_externs) {
@@ -2604,8 +2625,50 @@ void prepare_aux_sections() {
                         .super = true,
                         .physical = false};
 
+    g_vga = malloc(sizeof(*g_vga));
+    ARES_CHECK_OOM(g_vga);
+    *g_vga = (Section){.name = ".vga",
+                       .base = VGA_BASE,
+                       .limit = VGA_END,
+                       .contents = ARES_ARRAY_PREPARE(u8, VGA_SIZE),
+                       .emit_idx = 0,
+                       .align = 4,
+                       .relocations = {.buf = NULL, .len = 0, .cap = 0},
+                       .read = true,
+                       .write = true,
+                       .execute = false,
+                       .physical = true};
+    g_vga->contents.buf = malloc(g_vga->contents.len);
+    memset(g_vga->contents.buf, 0, g_vga->contents.len);
+
+    g_gif = malloc(sizeof(*g_gif));
+    ARES_CHECK_OOM(g_gif);
+    *g_gif = (Section){.name = ".gif",
+                       .base = GIF_BASE,
+                       .limit = GIF_END,
+                       .contents = ARES_ARRAY_PREPARE(u8, GIF_MAX_SIZE),
+                       .emit_idx = 0,
+                       .align = 1,
+                       .relocations = {.buf = NULL, .len = 0, .cap = 0},
+                       .read = true,
+                       .write = true,
+                       .execute = false,
+                       .physical = true};
+    g_gif->contents.buf = malloc(g_gif->contents.len);
+    memset(g_gif->contents.buf, 0, g_gif->contents.len);
+
+    g_vga_base_addr = g_vga->base;
+    g_vga_len = g_vga->contents.len;
+    g_vga_ptr = (u32)(uintptr_t)g_vga->contents.buf;
+    g_gif_base_addr = g_gif->base;
+    g_gif_len = g_gif->contents.len;
+    g_gif_ptr = (u32)(uintptr_t)g_gif->contents.buf;
+    g_gif_used = 0;
+
     *ARES_ARRAY_PUSH(&g_sections) = g_stack;
     *ARES_ARRAY_PUSH(&g_sections) = g_mmio;
+    *ARES_ARRAY_PUSH(&g_sections) = g_vga;
+    *ARES_ARRAY_PUSH(&g_sections) = g_gif;
 }
 
 void prepare_runtime_sections() {

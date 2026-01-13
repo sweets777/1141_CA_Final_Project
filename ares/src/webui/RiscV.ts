@@ -6,6 +6,7 @@ interface WasmExports {
   assemble: (offset: number, len: number, allow_externs: boolean) => void;
   pc_to_label: (pc: number) => void;
   emu_load: (addr: number, size: number) => number;
+  emu_store: (addr: number, val: number, size: number) => void;
   __heap_base: number;
   g_regs: number;
   g_heap_size: number;
@@ -23,6 +24,13 @@ interface WasmExports {
   g_pc_to_label_len: number;
   g_shadow_stack: number;
   g_callsan_stack_written_by: number;
+  g_vga_base_addr: number;
+  g_vga_len: number;
+  g_vga_ptr: number;
+  g_gif_base_addr: number;
+  g_gif_len: number;
+  g_gif_ptr: number;
+  g_gif_used: number;
 }
 
 const INSTRUCTION_LIMIT: number = 100 * 1000;
@@ -50,11 +58,19 @@ export class WasmInterface {
   public shadowStack?: Uint32Array;
   public shadowStackLen?: Uint32Array;
   public callsanWrittenBy?: Uint8Array;
+  public vgaBase?: Uint32Array;
+  public vgaLen?: Uint32Array;
+  public vgaPtr?: Uint32Array;
+  public gifBase?: Uint32Array;
+  public gifLen?: Uint32Array;
+  public gifPtr?: Uint32Array;
+  public gifUsed?: Uint32Array;
 
   public emu_load: (addr: number, size: number) => number;
+  public emu_store: (addr: number, val: number, size: number) => void;
 
   constructor() {
-    this.memory = new WebAssembly.Memory({ initial: 7 });
+    this.memory = new WebAssembly.Memory({ initial: 128 });
   }
 
   createU8(off: number) {
@@ -88,6 +104,7 @@ export class WasmInterface {
       this.wasmInstance = instance;
       this.exports = this.wasmInstance.exports as unknown as WasmExports;
       this.emu_load = this.exports.emu_load;
+      this.emu_store = this.exports.emu_store;
       // Save a snapshot of the original memory to restore between builds.
       this.originalMemory = new Uint8Array(this.memory.buffer.slice(0));
       console.log("Wasm module loaded");
@@ -128,6 +145,13 @@ export class WasmInterface {
     this.callsanWrittenBy = this.createU8(
       this.exports.g_callsan_stack_written_by,
     );
+    this.vgaBase = this.createU32(this.exports.g_vga_base_addr);
+    this.vgaLen = this.createU32(this.exports.g_vga_len);
+    this.vgaPtr = this.createU32(this.exports.g_vga_ptr);
+    this.gifBase = this.createU32(this.exports.g_gif_base_addr);
+    this.gifLen = this.createU32(this.exports.g_gif_len);
+    this.gifPtr = this.createU32(this.exports.g_gif_ptr);
+    this.gifUsed = this.createU32(this.exports.g_gif_used);
     if (offset + strLen > this.memory.buffer.byteLength) {
       const pages = Math.ceil(
         (offset + strLen - this.memory.buffer.byteLength) / 65536,

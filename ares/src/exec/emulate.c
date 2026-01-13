@@ -839,11 +839,16 @@ void emulate() {
 }
 
 // wrapper for the webui
-u32 emu_load(u32 addr, int size) {
+export u32 emu_load(u32 addr, int size) {
     bool err;
     u32 val = LOAD(addr, size, &err);
     if (err) return 0;
     return val;
+}
+
+export void emu_store(u32 addr, u32 val, int size) {
+    bool err;
+    STORE(addr, val, size, &err);
 }
 
 void emulator_enter_kernel() {

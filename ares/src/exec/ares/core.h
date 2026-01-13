@@ -45,6 +45,17 @@ static inline void shadowstack_pop() {}
 #define STACK_LEN 4096
 #define DATA_END 0x70000000
 
+#define VGA_WIDTH 160
+#define VGA_HEIGHT 120
+#define VGA_BYTES_PER_PIXEL 4
+#define VGA_SIZE (VGA_WIDTH * VGA_HEIGHT * VGA_BYTES_PER_PIXEL)
+#define VGA_BASE 0x60000000
+#define VGA_END (VGA_BASE + VGA_SIZE)
+
+#define GIF_MAX_SIZE (4 * 1024 * 1024)
+#define GIF_BASE 0x50000000
+#define GIF_END (GIF_BASE + GIF_MAX_SIZE)
+
 #define KERNEL_TEXT_BASE 0xFFF80000
 #define KERNEL_TEXT_END 0xFFFFFFFF
 #define KERNEL_DATA_BASE 0xFFF00000
@@ -177,6 +188,16 @@ extern export Section *g_stack;
 extern export Section *g_kernel_data;
 extern export Section *g_kernel_text;
 extern export Section *g_mmio;
+extern export Section *g_vga;
+extern export Section *g_gif;
+
+extern export u32 g_vga_base_addr;
+extern export u32 g_vga_len;
+extern export u32 g_vga_ptr;
+extern export u32 g_gif_base_addr;
+extern export u32 g_gif_len;
+extern export u32 g_gif_ptr;
+extern export u32 g_gif_used;
 
 extern ARES_ARRAY(SectionPtr) g_sections;
 extern ARES_ARRAY(LabelData) g_labels;

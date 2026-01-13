@@ -2,6 +2,7 @@ import {
 	createComputed,
 	createEffect,
 	createRoot,
+	createSignal,
 	onMount,
 	Show,
 	Signal,
@@ -23,7 +24,7 @@ import { RegisterTable } from "./RegisterTable";
 import { MemoryView } from "./MemoryView";
 import { PaneResize } from "./PaneResize";
 import { githubLight, githubDark, Theme, Colors, githubHighlightStyle } from './GithubTheme'
-import { AsmErrState, continueStep, DebugState, ErrorState, fetchTestcases, getCurrentLine, IdleState, initialRegs, nextStep, quitDebug, RunningState, runNormal, runTestSuite, setWasmRuntime, singleStep, startStep, startStepTestSuite, StoppedState, testData, TestSuiteState, TestSuiteTableEntry, TEXT_BASE, wasmInterface, wasmRuntime, wasmTestsuite, wasmTestsuiteIdx } from "./EmulatorState";
+import { AsmErrState, buildAsm, continueStep, DebugState, ErrorState, fetchTestcases, getCurrentLine, IdleState, initialRegs, nextStep, quitDebug, RunningState, runNormal, runTestSuite, setWasmRuntime, singleStep, startStep, startStepTestSuite, StoppedState, testData, TestSuiteState, TestSuiteTableEntry, TEXT_BASE, wasmInterface, wasmRuntime, wasmTestsuite, wasmTestsuiteIdx } from "./EmulatorState";
 import { highlightTree } from "@lezer/highlight";
 
 let parserWithMetadata = parser.configure({
@@ -192,6 +193,172 @@ function doChangeTheme(): void {
 const isMac = navigator.platform.toLowerCase().includes('mac');
 const prefixStr = isMac ? "Ctrl-Shift" : "Ctrl-Alt"
 
+const VGA_WIDTH = 160;
+const VGA_HEIGHT = 120;
+const VGA_SCALE = 3;
+const VGA_TITLE = "ARES VGA";
+
+let gifInputRef: HTMLInputElement;
+const [vgaVisible, setVgaVisible] = createSignal(false);
+let vgaCanvas: HTMLCanvasElement | null = null;
+let vgaCtx: CanvasRenderingContext2D | null = null;
+let vgaImageData: ImageData | null = null;
+let vgaStatus: HTMLDivElement | null = null;
+let vgaTimer: number | null = null;
+let vgaBuffer: Uint8Array | null = null;
+
+function stopVgaPlayback(): void {
+	if (vgaTimer !== null) {
+		clearTimeout(vgaTimer);
+		vgaTimer = null;
+	}
+}
+
+function initVgaCanvas(): boolean {
+	if (!vgaCanvas) {
+		alert("Unable to create VGA canvas.");
+		return false;
+	}
+	vgaCanvas.width = VGA_WIDTH;
+	vgaCanvas.height = VGA_HEIGHT;
+	vgaCanvas.style.width = `${VGA_WIDTH * VGA_SCALE}px`;
+	vgaCanvas.style.height = `${VGA_HEIGHT * VGA_SCALE}px`;
+	vgaCanvas.style.imageRendering = "pixelated";
+	vgaCtx = vgaCanvas.getContext("2d");
+	if (!vgaCtx) {
+		alert("Unable to initialize VGA context.");
+		return false;
+	}
+	vgaImageData = vgaCtx.createImageData(VGA_WIDTH, VGA_HEIGHT);
+	return true;
+}
+
+function ensureVgaWindow(openIfNeeded: boolean): boolean {
+	if (vgaCanvas && vgaCtx && vgaImageData) {
+		return true;
+	}
+	if (!openIfNeeded) {
+		alert("VGA window is closed. Reopen it from the GIF button.");
+		return false;
+	}
+	setVgaVisible(true);
+	return initVgaCanvas();
+}
+
+function closeVgaWindow(): void {
+	stopVgaPlayback();
+	setVgaVisible(false);
+}
+
+function renderVga(): void {
+	if (!vgaBuffer || !vgaCtx || !vgaImageData) return;
+	vgaImageData.data.set(vgaBuffer.subarray(0, vgaImageData.data.length));
+	vgaCtx.putImageData(vgaImageData, 0, 0);
+}
+
+function openGifPicker(): void {
+	gifInputRef?.click();
+}
+
+async function loadGifToVga(file: File): Promise<void> {
+	await buildAsm(wasmRuntime, setWasmRuntime);
+	if (wasmRuntime.status == "asmerr") return;
+
+	const gifPtr = wasmInterface.gifPtr?.[0] ?? 0;
+	const gifLen = wasmInterface.gifLen?.[0] ?? 0;
+	const vgaPtr = wasmInterface.vgaPtr?.[0] ?? 0;
+	const vgaLen = wasmInterface.vgaLen?.[0] ?? 0;
+	if (!gifPtr || !gifLen || !vgaPtr || !vgaLen) {
+		alert("VGA/GIF memory not initialized yet.");
+		return;
+	}
+	if (vgaLen < VGA_WIDTH * VGA_HEIGHT * 4) {
+		alert("VGA buffer is smaller than expected.");
+		return;
+	}
+	if (!ensureVgaWindow(true)) return;
+
+	if (vgaStatus) {
+		vgaStatus.textContent = `Loading ${file.name}...`;
+	}
+	const buffer = await file.arrayBuffer();
+	const gifBytes = new Uint8Array(buffer);
+	if (gifBytes.length > gifLen) {
+		alert(`GIF is too large for memory (${gifBytes.length} > ${gifLen} bytes).`);
+		return;
+	}
+
+	wasmInterface.createU8(gifPtr).set(gifBytes);
+	if (wasmInterface.gifUsed) wasmInterface.gifUsed[0] = gifBytes.length;
+
+	vgaBuffer = wasmInterface.createU8(vgaPtr).subarray(0, vgaLen);
+	vgaBuffer.fill(0);
+	renderVga();
+
+	if (!("ImageDecoder" in window)) {
+		alert("This browser does not support ImageDecoder for GIF playback.");
+		return;
+	}
+
+	const decoder = new ImageDecoder({ data: buffer, type: "image/gif" });
+	if (vgaStatus) {
+		vgaStatus.textContent = "Playing GIF...";
+	}
+	await decoder.tracks.ready;
+	const frameCount = decoder.tracks.selectedTrack.frameCount || 1;
+	const offscreen = document.createElement("canvas");
+	offscreen.width = VGA_WIDTH;
+	offscreen.height = VGA_HEIGHT;
+	const offCtx = offscreen.getContext("2d");
+	if (!offCtx) {
+		alert("Unable to create GIF decoder canvas.");
+		return;
+	}
+
+	const frames: { data: Uint8ClampedArray; delay: number }[] = [];
+	for (let i = 0; i < frameCount; i++) {
+		const result = await decoder.decode({ frameIndex: i });
+		const frame = result.image;
+		const frameWidth = frame.displayWidth || VGA_WIDTH;
+		const frameHeight = frame.displayHeight || VGA_HEIGHT;
+		const scale = Math.min(VGA_WIDTH / frameWidth, VGA_HEIGHT / frameHeight);
+		const drawWidth = Math.round(frameWidth * scale);
+		const drawHeight = Math.round(frameHeight * scale);
+		const offsetX = Math.round((VGA_WIDTH - drawWidth) / 2);
+		const offsetY = Math.round((VGA_HEIGHT - drawHeight) / 2);
+		offCtx.clearRect(0, 0, VGA_WIDTH, VGA_HEIGHT);
+		offCtx.drawImage(frame, offsetX, offsetY, drawWidth, drawHeight);
+		const imageData = offCtx.getImageData(0, 0, VGA_WIDTH, VGA_HEIGHT);
+		const duration = typeof frame.duration === "number" ? frame.duration : 100000;
+		frames.push({ data: new Uint8ClampedArray(imageData.data), delay: Math.max(20, duration / 1000) });
+		frame.close();
+	}
+	decoder.close();
+
+	stopVgaPlayback();
+	let frameIndex = 0;
+	const playFrame = () => {
+		if (!vgaBuffer || !vgaCanvas || !vgaCtx || !vgaImageData || !vgaVisible()) return;
+		const frame = frames[frameIndex];
+		vgaBuffer.set(frame.data.subarray(0, vgaBuffer.length));
+		renderVga();
+		frameIndex = (frameIndex + 1) % frames.length;
+		vgaTimer = window.setTimeout(playFrame, frame.delay);
+	};
+	playFrame();
+}
+
+function handleGifInput(event: Event): void {
+	const input = event.target as HTMLInputElement;
+	const file = input.files?.[0];
+	if (!file) return;
+	input.value = "";
+	loadGifToVga(file).catch((err) => {
+		console.error(err);
+		alert(`Failed to load GIF: ${String(err)}`);
+	});
+}
+
 window.addEventListener('keydown', (event) => {
 	// FIXME: this is deprecated but i'm not sure what is the correct successor
 	const prefix = isMac ? (event.ctrlKey && event.shiftKey) : (event.ctrlKey && event.altKey);
@@ -270,6 +437,20 @@ const Navbar: Component = () => {
 						<div class="cursor-pointer flex-shrink-0 mx-auto"></div></>
 					}
 					</Show>
+					<button
+						on:click={openGifPicker}
+						class="cursor-pointer flex-0-shrink flex material-symbols-outlined theme-fg theme-bg-hover theme-bg-active"
+						title="Load GIF to VGA"
+					>
+						<span class="text-[18px] leading-none">gif_box</span>
+					</button>
+					<input
+						ref={gifInputRef}
+						type="file"
+						accept="image/gif"
+						class="hidden"
+						on:change={handleGifInput}
+					/>
 					<button
 						on:click={doChangeTheme}
 						class="cursor-pointer flex-0-shrink flex material-symbols-outlined theme-fg theme-bg-hover theme-bg-active"
@@ -609,6 +790,30 @@ const App: Component = () => {
 	return (
 		<div class="fullsize flex flex-col justify-between overflow-hidden">
 			<Navbar />
+			<div
+				class={`fixed inset-0 z-50 flex items-center justify-center bg-black/60 ${vgaVisible() ? "" : "hidden"}`}
+				on:click={closeVgaWindow}
+			>
+				<div
+					class="theme-bg theme-fg border theme-border rounded-lg p-4"
+					on:click={(event) => event.stopPropagation()}
+				>
+					<div class="flex items-center justify-between mb-2">
+						<div class="font-semibold">ARES VGA</div>
+						<button
+							on:click={closeVgaWindow}
+							class="cursor-pointer theme-fg theme-bg-hover theme-bg-active"
+							title="Close VGA"
+						>
+							close
+						</button>
+					</div>
+					<div ref={vgaStatus} class="text-sm text-center mb-2">
+						Waiting for GIF...
+					</div>
+					<canvas ref={vgaCanvas} style={{ display: "block", margin: "0 auto", background: "#000" }}></canvas>
+				</div>
+			</div>
 			<div class="grow flex overflow-hidden">
 				<PaneResize firstSize={0.5} direction="horizontal" second={true}>
 					{() =>

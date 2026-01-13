@@ -52,3 +52,6 @@ void emulator_deliver_interrupt(u32 cause);
 void emulator_init(void);
 void emulator_interrupt_set_pending(u32 intno);
 void emulator_interrupt_clear_pending(u32 intno);
+
+export u32 emu_load(u32 addr, int size);
+export void emu_store(u32 addr, u32 val, int size);
