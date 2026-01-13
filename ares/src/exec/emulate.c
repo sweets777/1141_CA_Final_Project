@@ -169,7 +169,7 @@ void STORE(u32 addr, u32 val, int size, bool *err) {
     *err = false;
 }
 
-void do_syscall() {
+void do_syscall(u32 inst_len) {
     u32 scause = CAUSE_U_ECALL;
     if (g_privilege_level == PRIV_SUPERVISOR) {
         scause = CAUSE_S_ECALL;
@@ -227,7 +227,7 @@ void do_syscall() {
         emu_exit();
     }
 
-    g_pc += 4;
+    g_pc += inst_len;
 }
 
 void do_sret() {
@@ -277,28 +277,267 @@ void wrcsr(u32 csr, u32 val) {
     g_csr[csr] = (g_csr[csr] & ~mask) | (val & mask);
 }
 
-void emulate() {
-    g_runtime_error_type = ERROR_NONE;
-    g_mem_written_len = 0;
-    g_reg_written = 0;
-    g_regs[0] = 0;
-    bool err;
+static inline u32 encode_i(u32 opcode, u32 funct3, u32 rd, u32 rs1, i32 imm) {
+    return opcode | ((rd & 0x1f) << 7) | ((funct3 & 0x7) << 12) |
+           ((rs1 & 0x1f) << 15) | ((imm & 0xfff) << 20);
+}
 
-    if (g_csr[CSR_MSTATUS] & STATUS_SIE) {
-        u32 pending = g_csr[CSR_MIP] & g_csr[CSR_MIE];
-        if (pending != 0) {
-            int intno = __builtin_ctz(pending);
-            emulator_deliver_interrupt(CAUSE_INTERRUPT | intno);
+static inline u32 encode_r(u32 opcode, u32 funct7, u32 funct3, u32 rd, u32 rs1,
+                           u32 rs2) {
+    return opcode | ((rd & 0x1f) << 7) | ((funct3 & 0x7) << 12) |
+           ((rs1 & 0x1f) << 15) | ((rs2 & 0x1f) << 20) |
+           ((funct7 & 0x7f) << 25);
+}
+
+static inline u32 encode_s(u32 opcode, u32 funct3, u32 rs1, u32 rs2, i32 imm) {
+    u32 uimm = (u32)imm;
+    return opcode | ((uimm & 0x1f) << 7) | ((funct3 & 0x7) << 12) |
+           ((rs1 & 0x1f) << 15) | ((rs2 & 0x1f) << 20) |
+           (((uimm >> 5) & 0x7f) << 25);
+}
+
+static inline u32 encode_b(u32 opcode, u32 funct3, u32 rs1, u32 rs2, i32 imm) {
+    u32 uimm = (u32)imm;
+    return opcode | (((uimm >> 11) & 0x1) << 7) | (((uimm >> 1) & 0xf) << 8) |
+           ((funct3 & 0x7) << 12) | ((rs1 & 0x1f) << 15) |
+           ((rs2 & 0x1f) << 20) | (((uimm >> 5) & 0x3f) << 25) |
+           (((uimm >> 12) & 0x1) << 31);
+}
+
+static inline u32 encode_u(u32 opcode, u32 rd, i32 imm) {
+    return opcode | ((rd & 0x1f) << 7) | (imm & 0xfffff000);
+}
+
+static inline u32 encode_j(u32 opcode, u32 rd, i32 imm) {
+    u32 uimm = (u32)imm;
+    return opcode | ((rd & 0x1f) << 7) | (((uimm >> 12) & 0xff) << 12) |
+           (((uimm >> 11) & 0x1) << 20) | (((uimm >> 1) & 0x3ff) << 21) |
+           (((uimm >> 20) & 0x1) << 31);
+}
+
+static bool decompress_rvc(u16 inst, u32 *out) {
+    if (inst == 0) return false;
+
+    u32 opcode = inst & 0x3;
+    u32 funct3 = (inst >> 13) & 0x7;
+
+    if (opcode == 0b00) {
+        if (funct3 == 0b000) {
+            u32 rd = 8 + ((inst >> 2) & 0x7);
+            u32 imm = 0;
+            imm |= ((inst >> 6) & 0x1) << 2;
+            imm |= ((inst >> 5) & 0x1) << 3;
+            imm |= ((inst >> 11) & 0x1) << 4;
+            imm |= ((inst >> 12) & 0x1) << 5;
+            imm |= ((inst >> 7) & 0x1) << 6;
+            imm |= ((inst >> 8) & 0x1) << 7;
+            imm |= ((inst >> 9) & 0x1) << 8;
+            imm |= ((inst >> 10) & 0x1) << 9;
+            if (imm == 0) return false;
+            *out = encode_i(0b0010011, 0b000, rd, 2, (i32)imm);
+            return true;
         }
+        if (funct3 == 0b010) {
+            u32 rd = 8 + ((inst >> 2) & 0x7);
+            u32 rs1 = 8 + ((inst >> 7) & 0x7);
+            u32 imm = 0;
+            imm |= ((inst >> 6) & 0x1) << 2;
+            imm |= ((inst >> 10) & 0x7) << 3;
+            imm |= ((inst >> 5) & 0x1) << 6;
+            *out = encode_i(0b0000011, 0b010, rd, rs1, (i32)imm);
+            return true;
+        }
+        if (funct3 == 0b110) {
+            u32 rs2 = 8 + ((inst >> 2) & 0x7);
+            u32 rs1 = 8 + ((inst >> 7) & 0x7);
+            u32 imm = 0;
+            imm |= ((inst >> 6) & 0x1) << 2;
+            imm |= ((inst >> 10) & 0x7) << 3;
+            imm |= ((inst >> 5) & 0x1) << 6;
+            *out = encode_s(0b0100011, 0b010, rs1, rs2, (i32)imm);
+            return true;
+        }
+        return false;
     }
 
-    u32 inst = LOAD(g_pc, 4, &err);
-    if (err) {
-        g_runtime_error_params[0] = g_pc;
-        g_runtime_error_type = ERROR_FETCH;
-        return;
+    if (opcode == 0b01) {
+        if (funct3 == 0b000) {
+            u32 rd = (inst >> 7) & 0x1f;
+            i32 imm = sext(((inst >> 2) & 0x1f) | ((inst >> 12) & 0x1) << 5, 6);
+            *out = encode_i(0b0010011, 0b000, rd, rd, imm);
+            return true;
+        }
+        if (funct3 == 0b001) {
+            i32 imm = 0;
+            imm |= ((inst >> 12) & 0x1) << 11;
+            imm |= ((inst >> 11) & 0x1) << 4;
+            imm |= ((inst >> 9) & 0x3) << 8;
+            imm |= ((inst >> 8) & 0x1) << 10;
+            imm |= ((inst >> 7) & 0x1) << 6;
+            imm |= ((inst >> 6) & 0x1) << 7;
+            imm |= ((inst >> 3) & 0x7) << 1;
+            imm |= ((inst >> 2) & 0x1) << 5;
+            imm = sext(imm, 12);
+            *out = encode_j(0b1101111, 1, imm);
+            return true;
+        }
+        if (funct3 == 0b010) {
+            u32 rd = (inst >> 7) & 0x1f;
+            i32 imm = sext(((inst >> 2) & 0x1f) | ((inst >> 12) & 0x1) << 5, 6);
+            *out = encode_i(0b0010011, 0b000, rd, 0, imm);
+            return true;
+        }
+        if (funct3 == 0b011) {
+            u32 rd = (inst >> 7) & 0x1f;
+            if (rd == 2) {
+                i32 imm = 0;
+                imm |= ((inst >> 12) & 0x1) << 9;
+                imm |= ((inst >> 6) & 0x1) << 4;
+                imm |= ((inst >> 5) & 0x1) << 6;
+                imm |= ((inst >> 4) & 0x1) << 8;
+                imm |= ((inst >> 3) & 0x1) << 7;
+                imm |= ((inst >> 2) & 0x1) << 5;
+                imm = sext(imm, 10);
+                if (imm == 0) return false;
+                *out = encode_i(0b0010011, 0b000, 2, 2, imm);
+                return true;
+            }
+            i32 imm = 0;
+            imm |= ((inst >> 12) & 0x1) << 17;
+            imm |= ((inst >> 2) & 0x1f) << 12;
+            imm = sext(imm, 18);
+            *out = encode_u(0b0110111, rd, imm);
+            return true;
+        }
+        if (funct3 == 0b100) {
+            u32 subop = (inst >> 10) & 0x3;
+            u32 rd = 8 + ((inst >> 7) & 0x7);
+            u32 rs2 = 8 + ((inst >> 2) & 0x7);
+            u32 shamt = ((inst >> 2) & 0x1f) | ((inst >> 12) & 0x1) << 5;
+            if (subop == 0b00) {
+                if (shamt & 0x20) return false;
+                *out = encode_i(0b0010011, 0b101, rd, rd, (i32)shamt);
+                return true;
+            }
+            if (subop == 0b01) {
+                if (shamt & 0x20) return false;
+                *out = encode_i(0b0010011, 0b101, rd, rd,
+                                (i32)(shamt | (0b0100000 << 5)));
+                return true;
+            }
+            if (subop == 0b10) {
+                i32 imm = sext(((inst >> 2) & 0x1f) | ((inst >> 12) & 0x1) << 5,
+                               6);
+                *out = encode_i(0b0010011, 0b111, rd, rd, imm);
+                return true;
+            }
+            if ((inst >> 12) & 0x1) return false;
+            u32 arith = (inst >> 5) & 0x3;
+            if (arith == 0b00)
+                *out = encode_r(0b0110011, 0b0100000, 0b000, rd, rd, rs2);
+            else if (arith == 0b01)
+                *out = encode_r(0b0110011, 0b0000000, 0b100, rd, rd, rs2);
+            else if (arith == 0b10)
+                *out = encode_r(0b0110011, 0b0000000, 0b110, rd, rd, rs2);
+            else if (arith == 0b11)
+                *out = encode_r(0b0110011, 0b0000000, 0b111, rd, rd, rs2);
+            else
+                return false;
+            return true;
+        }
+        if (funct3 == 0b101) {
+            i32 imm = 0;
+            imm |= ((inst >> 12) & 0x1) << 11;
+            imm |= ((inst >> 11) & 0x1) << 4;
+            imm |= ((inst >> 9) & 0x3) << 8;
+            imm |= ((inst >> 8) & 0x1) << 10;
+            imm |= ((inst >> 7) & 0x1) << 6;
+            imm |= ((inst >> 6) & 0x1) << 7;
+            imm |= ((inst >> 3) & 0x7) << 1;
+            imm |= ((inst >> 2) & 0x1) << 5;
+            imm = sext(imm, 12);
+            *out = encode_j(0b1101111, 0, imm);
+            return true;
+        }
+        if (funct3 == 0b110 || funct3 == 0b111) {
+            u32 rs1 = 8 + ((inst >> 7) & 0x7);
+            i32 imm = 0;
+            imm |= ((inst >> 12) & 0x1) << 8;
+            imm |= ((inst >> 10) & 0x3) << 3;
+            imm |= ((inst >> 5) & 0x3) << 6;
+            imm |= ((inst >> 3) & 0x3) << 1;
+            imm |= ((inst >> 2) & 0x1) << 5;
+            imm = sext(imm, 9);
+            u32 funct = (funct3 == 0b110) ? 0b000 : 0b001;
+            *out = encode_b(0b1100011, funct, rs1, 0, imm);
+            return true;
+        }
+        return false;
     }
 
+    if (opcode == 0b10) {
+        if (funct3 == 0b000) {
+            u32 rd = (inst >> 7) & 0x1f;
+            u32 shamt = ((inst >> 2) & 0x1f) | ((inst >> 12) & 0x1) << 5;
+            if (rd == 0 || (shamt & 0x20)) return false;
+            *out = encode_i(0b0010011, 0b001, rd, rd, (i32)shamt);
+            return true;
+        }
+        if (funct3 == 0b010) {
+            u32 rd = (inst >> 7) & 0x1f;
+            if (rd == 0) return false;
+            u32 imm = 0;
+            imm |= ((inst >> 12) & 0x1) << 5;
+            imm |= ((inst >> 4) & 0x7) << 2;
+            imm |= ((inst >> 2) & 0x3) << 6;
+            *out = encode_i(0b0000011, 0b010, rd, 2, (i32)imm);
+            return true;
+        }
+        if (funct3 == 0b100) {
+            u32 rs1 = (inst >> 7) & 0x1f;
+            u32 rs2 = (inst >> 2) & 0x1f;
+            u32 bit12 = (inst >> 12) & 0x1;
+            if (!bit12) {
+                if (rs2 == 0) {
+                    if (rs1 == 0) return false;
+                    *out = encode_i(0b1100111, 0b000, 0, rs1, 0);
+                    return true;
+                }
+                *out = encode_r(0b0110011, 0b0000000, 0b000, rs1, 0, rs2);
+                return true;
+            }
+            if (rs1 == 0 && rs2 == 0) {
+                *out = 0x00100073;
+                return true;
+            }
+            if (rs2 == 0) {
+                if (rs1 == 0) return false;
+                *out = encode_i(0b1100111, 0b000, 1, rs1, 0);
+                return true;
+            }
+            if (rs1 == 0) return false;
+            *out = encode_r(0b0110011, 0b0000000, 0b000, rs1, rs1, rs2);
+            return true;
+        }
+        if (funct3 == 0b110) {
+            u32 rs2 = (inst >> 2) & 0x1f;
+            u32 imm = 0;
+            imm |= ((inst >> 12) & 0x1) << 5;
+            imm |= ((inst >> 11) & 0x1) << 4;
+            imm |= ((inst >> 10) & 0x1) << 3;
+            imm |= ((inst >> 9) & 0x1) << 2;
+            imm |= ((inst >> 8) & 0x1) << 7;
+            imm |= ((inst >> 7) & 0x1) << 6;
+            *out = encode_s(0b0100011, 0b010, 2, rs2, (i32)imm);
+            return true;
+        }
+        return false;
+    }
+
+    return false;
+}
+
+static void execute_inst(u32 inst, u32 inst_len) {
     u32 rd = extr(inst, 11, 7);
     u32 rs1 = extr(inst, 19, 15);
     u32 rs2 = extr(inst, 24, 20);
@@ -320,11 +559,12 @@ void emulate() {
     u32 *D = &g_regs[rd];
 
     u32 opcode = extr(inst, 6, 0);
+    bool err;
 
     // LUI
     if (opcode == 0b0110111) {
         *D = utype;
-        g_pc += 4;
+        g_pc += inst_len;
         g_reg_written = rd;
         callsan_store(rd);
         return;
@@ -333,7 +573,7 @@ void emulate() {
     // AUIPC
     if (opcode == 0b0010111) {
         *D = g_pc + utype;
-        g_pc += 4;
+        g_pc += inst_len;
         g_reg_written = rd;
         callsan_store(rd);
         return;
@@ -341,7 +581,7 @@ void emulate() {
 
     // JAL
     if (opcode == 0b1101111) {
-        *D = g_pc + 4;
+        *D = g_pc + inst_len;
         g_pc += jtype;
         g_reg_written = rd;
         callsan_store(rd);
@@ -353,7 +593,7 @@ void emulate() {
     if (opcode == 0b1100111) {
         if (!callsan_can_load(rs1)) return;
         callsan_store(rd);
-        *D = g_pc + 4;
+        *D = g_pc + inst_len;
         // this has to be checked before updating pc so that the highlighted pc
         // is correct
         if (rd == 0 && rs1 == 1) {  // jr ra/ret
@@ -379,7 +619,7 @@ void emulate() {
             return;
         }
         if (funct3 & 1) T = !T;
-        g_pc += T ? btype : 4;
+        g_pc += T ? btype : (i32)inst_len;
         return;
     }
 
@@ -407,7 +647,7 @@ void emulate() {
             return;
         }
 
-        g_pc += 4;
+        g_pc += inst_len;
         g_reg_written = rd;
         callsan_store(rd);
         return;
@@ -431,7 +671,7 @@ void emulate() {
             return;
         }
         callsan_report_store(S1 + stype, 1 << funct3, rs2);
-        g_pc += 4;
+        g_pc += inst_len;
         return;
     }
 
@@ -454,7 +694,7 @@ void emulate() {
             g_runtime_error_type = ERROR_UNHANDLED_INSN;
             return;
         }
-        g_pc += 4;
+        g_pc += inst_len;
         g_reg_written = rd;
         callsan_store(rd);
         return;
@@ -469,9 +709,9 @@ void emulate() {
         else if (funct3 == 0b000 && funct7 == 32) *D = S1 - S2;           // SUB
         else if (funct3 == 0b001 && funct7 == 0) *D = S1 << shamt;        // SLL
         else if (funct3 == 0b010 && funct7 == 0) *D = (i32)S1 < (i32)S2;  // SLT
-        else if (funct3 == 0b011 && funct7 == 0) *D = S1 < S2;      // SLTU
-        else if (funct3 == 0b100 && funct7 == 0) *D = S1 ^ S2;      // XOR
-        else if (funct3 == 0b101 && funct7 == 0) *D = S1 >> shamt;  // SRL
+        else if (funct3 == 0b011 && funct7 == 0) *D = S1 < S2;            // SLTU
+        else if (funct3 == 0b100 && funct7 == 0) *D = S1 ^ S2;            // XOR
+        else if (funct3 == 0b101 && funct7 == 0) *D = S1 >> shamt;        // SRL
         else if (funct3 == 0b101 && funct7 == 32) *D = (i32)S1 >> shamt;  // SRA
         else if (funct3 == 0b110 && funct7 == 0) *D = S1 | S2;            // OR
         else if (funct3 == 0b111 && funct7 == 0) *D = S1 & S2;            // AND
@@ -491,7 +731,7 @@ void emulate() {
             g_runtime_error_type = ERROR_UNHANDLED_INSN;
             return;
         }
-        g_pc += 4;
+        g_pc += inst_len;
         g_reg_written = rd;
         callsan_store(rd);
         return;
@@ -501,8 +741,11 @@ void emulate() {
         if (funct3 == 0b000) {
             if (itype == 0x102) {  // SRET
                 do_sret();
+            } else if (itype == 0x001) {  // EBREAK
+                emu_exit();
+                g_pc += inst_len;
             } else {  // ECALL
-                do_syscall();
+                do_syscall(inst_len);
             }
             return;
         } else if (funct3 == 0b001) {  // CSRRW
@@ -540,7 +783,7 @@ void emulate() {
             g_runtime_error_type = ERROR_PROTECTION;
         }
 
-        g_pc += 4;
+        g_pc += inst_len;
         g_reg_written = rd;
         return;
     }
@@ -550,6 +793,49 @@ end:
     g_runtime_error_params[0] = g_pc;
     g_runtime_error_type = ERROR_UNHANDLED_INSN;
     return;
+}
+
+void emulate() {
+    g_runtime_error_type = ERROR_NONE;
+    g_mem_written_len = 0;
+    g_reg_written = 0;
+    g_regs[0] = 0;
+    bool err;
+
+    if (g_csr[CSR_MSTATUS] & STATUS_SIE) {
+        u32 pending = g_csr[CSR_MIP] & g_csr[CSR_MIE];
+        if (pending != 0) {
+            int intno = __builtin_ctz(pending);
+            emulator_deliver_interrupt(CAUSE_INTERRUPT | intno);
+        }
+    }
+
+    u16 inst16 = LOAD(g_pc, 2, &err);
+    if (err) {
+        g_runtime_error_params[0] = g_pc;
+        g_runtime_error_type = ERROR_FETCH;
+        return;
+    }
+
+    if ((inst16 & 0x3) != 0x3) {
+        u32 inst32 = 0;
+        if (!decompress_rvc(inst16, &inst32)) {
+            g_runtime_error_params[0] = g_pc;
+            g_runtime_error_type = ERROR_UNHANDLED_INSN;
+            return;
+        }
+        execute_inst(inst32, 2);
+        return;
+    }
+
+    u32 inst = LOAD(g_pc, 4, &err);
+    if (err) {
+        g_runtime_error_params[0] = g_pc;
+        g_runtime_error_type = ERROR_FETCH;
+        return;
+    }
+
+    execute_inst(inst, 4);
 }
 
 // wrapper for the webui

@@ -11,11 +11,11 @@ void callsan_init() {
     memset(g_callsan_stack_written_by, 0xFF,
            sizeof(g_callsan_stack_written_by));
     g_reg_bitmap = (1ul << REG_ZERO) | (1ul << REG_SP) | (1ul << REG_TP) |
-                   (1ul << REG_GP) | (1u << REG_FP) | (1u << REG_S1) |
-                   (1u << REG_S2) | (1u << REG_S3) | (1u << REG_S4) |
-                   (1u << REG_S5) | (1u << REG_S6) | (1u << REG_S7) |
-                   (1u << REG_S8) | (1u << REG_S9) | (1u << REG_S10) |
-                   (1u << REG_S11);
+                   (1ul << REG_GP) | (1ul << REG_RA) | (1u << REG_FP) |
+                   (1u << REG_S1) | (1u << REG_S2) | (1u << REG_S3) |
+                   (1u << REG_S4) | (1u << REG_S5) | (1u << REG_S6) |
+                   (1u << REG_S7) | (1u << REG_S8) | (1u << REG_S9) |
+                   (1u << REG_S10) | (1u << REG_S11);
     g_shadow_stack = ARES_ARRAY_NEW(ShadowStackEnt);
 }
 

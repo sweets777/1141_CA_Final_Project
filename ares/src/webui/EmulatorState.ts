@@ -124,9 +124,10 @@ function setBreakpoints(): void {
 	view.state.field(breakpointState).between(0, view.state.doc.length, (from) => {
 		const line = view.state.doc.lineAt(from);
 		const lineNum = line.number;
-		for (let i = 0; i < 65536; i++) {
+		const len = wasmInterface.textByLinenumLen?.[0] ?? 0;
+		for (let i = 0; i < len; i++) {
 			if (wasmInterface.textByLinenum[i] == lineNum) {
-				breakpoints.add(TEXT_BASE + i * 4);
+				breakpoints.add(TEXT_BASE + i * 2);
 			}
 		}
 	});
@@ -331,7 +332,7 @@ export async function startStepTestSuite(_runtime: RuntimeState, setRuntime, ind
 	// run instructions until you hit user code
 	while (true) {
 		wasmInterface.run();
-		let linenoIdx = (wasmInterface.pc[0] - TEXT_BASE) / 4;
+		let linenoIdx = (wasmInterface.pc[0] - TEXT_BASE) / 2;
 		if (linenoIdx < wasmInterface.textByLinenumLen[0]) {
 			if (wasmInterface.textByLinenum[linenoIdx] < view.state.doc.lines) break;
 		}
@@ -375,14 +376,38 @@ export function continueStep(_runtime: DebugState, setRuntime): void {
 }
 
 export function nextStep(_runtime: DebugState, setRuntime): void {
-	const inst = wasmInterface.emu_load(wasmInterface.pc[0], 4);
-	const opcode = inst & 127;
-	const funct3 = (inst >> 12) & 7;
-	const rd = (inst >> 7) & 31;
-	const isJal = opcode === 0x6f;
-	const isJalr = opcode === 0x67 && funct3 === 0;
-	if ((isJal || isJalr) && rd === 1) {
-		temporaryBreakpoint = wasmInterface.pc[0] + 4;
+	const pc = wasmInterface.pc[0];
+	const inst16 = wasmInterface.emu_load(pc, 2);
+	const isCompressed = (inst16 & 0x3) !== 0x3;
+	let isCall = false;
+
+	if (isCompressed) {
+		const opcode = inst16 & 0x3;
+		const funct3 = (inst16 >> 13) & 0x7;
+		if (opcode === 1 && funct3 === 1) {
+			isCall = true; // c.jal
+		} else if (opcode === 2 && funct3 === 4) {
+			const bit12 = (inst16 >> 12) & 0x1;
+			const rs2 = (inst16 >> 2) & 0x1f;
+			const rs1 = (inst16 >> 7) & 0x1f;
+			if (bit12 === 1 && rs2 === 0 && rs1 !== 0) {
+				isCall = true; // c.jalr
+			}
+		}
+	} else {
+		const inst = wasmInterface.emu_load(pc, 4);
+		const opcode = inst & 127;
+		const funct3 = (inst >> 12) & 7;
+		const rd = (inst >> 7) & 31;
+		const isJal = opcode === 0x6f;
+		const isJalr = opcode === 0x67 && funct3 === 0;
+		if ((isJal || isJalr) && rd === 1) {
+			isCall = true;
+		}
+	}
+
+	if (isCall) {
+		temporaryBreakpoint = pc + (isCompressed ? 2 : 4);
 		savedSp = wasmInterface.regsArr[2 - 1];
 		continueStep(_runtime, setRuntime);
 	} else {
@@ -396,7 +421,7 @@ export function quitDebug(_runtime: DebugState, setRuntime): void {
 
 // in accordance to CodeMirror, 0 = invalid line (PC out of the file)
 export function getCurrentLine(_runtime: DebugState | ErrorState): number {
-	let linenoIdx = (_runtime.pc - TEXT_BASE) / 4;
+	let linenoIdx = (_runtime.pc - TEXT_BASE) / 2;
 	if (linenoIdx < wasmInterface.textByLinenumLen[0])
 		return wasmInterface.textByLinenum[linenoIdx];
 	return 0;

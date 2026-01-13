@@ -393,6 +393,12 @@ int parse_csr(Parser *p) {
     return -1;
 }
 
+int parse_reg_prime(Parser *p) {
+    int reg = parse_reg(p);
+    if (reg < 8 || reg > 15) return -1;
+    return reg;
+}
+
 void asm_emit_byte(u8 byte, int linenum) {
     if (!g_in_fixup) {
         *ARES_ARRAY_PUSH(&g_section->contents) = byte;
@@ -402,15 +408,557 @@ void asm_emit_byte(u8 byte, int linenum) {
     g_section->emit_idx++;
 }
 
-void asm_emit(u32 inst, int linenum) {
+static inline u32 inst_bits(u32 val, int end, int start) {
+    u32 mask = (1u << (end + 1 - start)) - 1;
+    return (val >> start) & mask;
+}
+
+static inline i32 inst_sext(u32 val, int bits) {
+    int shift = 32 - bits;
+    return ((i32)(val << shift)) >> shift;
+}
+
+static bool encode_c_addi4spn(int rd, i32 imm, u16 *out);
+static bool encode_c_lw(int rd, int rs1, i32 imm, u16 *out);
+static bool encode_c_sw(int rs2, int rs1, i32 imm, u16 *out);
+static bool encode_c_addi(int rd, i32 imm, u16 *out);
+static bool encode_c_li(int rd, i32 imm, u16 *out);
+static bool encode_c_lui(int rd, i32 imm, u16 *out);
+static bool encode_c_addi16sp(i32 imm, u16 *out);
+static bool encode_c_srli(int rd, u32 shamt, u16 *out);
+static bool encode_c_srai(int rd, u32 shamt, u16 *out);
+static bool encode_c_andi(int rd, i32 imm, u16 *out);
+static bool encode_c_sub(int rd, int rs2, u16 *out);
+static bool encode_c_xor(int rd, int rs2, u16 *out);
+static bool encode_c_or(int rd, int rs2, u16 *out);
+static bool encode_c_and(int rd, int rs2, u16 *out);
+static bool encode_c_j(i32 imm, bool link, u16 *out);
+static bool encode_c_beqz(int rs1, i32 imm, u16 *out);
+static bool encode_c_bnez(int rs1, i32 imm, u16 *out);
+static bool encode_c_slli(int rd, u32 shamt, u16 *out);
+static bool encode_c_lwsp(int rd, i32 imm, u16 *out);
+static bool encode_c_swsp(int rs2, i32 imm, u16 *out);
+static bool encode_c_jr(int rs1, u16 *out);
+static bool encode_c_jalr(int rs1, u16 *out);
+static bool encode_c_mv(int rd, int rs2, u16 *out);
+static bool encode_c_add(int rd, int rs2, u16 *out);
+static bool encode_c_ebreak(u16 *out);
+
+static bool try_compress(u32 inst, u16 *out) {
+    u32 opcode = inst_bits(inst, 6, 0);
+    u32 rd = inst_bits(inst, 11, 7);
+    u32 rs1 = inst_bits(inst, 19, 15);
+    u32 rs2 = inst_bits(inst, 24, 20);
+    u32 funct3 = inst_bits(inst, 14, 12);
+    u32 funct7 = inst_bits(inst, 31, 25);
+
+    i32 itype = inst_sext(inst_bits(inst, 31, 20), 12);
+    i32 stype = inst_sext((inst_bits(inst, 31, 25) << 5) | inst_bits(inst, 11, 7), 12);
+    i32 btype = inst_sext((inst_bits(inst, 31, 31) << 12) | (inst_bits(inst, 7, 7) << 11) |
+                              (inst_bits(inst, 30, 25) << 5) | (inst_bits(inst, 11, 8) << 1),
+                          13);
+    i32 jtype = inst_sext((inst_bits(inst, 31, 31) << 20) | (inst_bits(inst, 19, 12) << 12) |
+                              (inst_bits(inst, 20, 20) << 11) | (inst_bits(inst, 30, 21) << 1),
+                          21);
+    i32 utype = inst_sext(inst_bits(inst, 31, 12), 20) << 12;
+
+    if (opcode == 0b0010011 && funct3 == 0b000) {
+        if (rs1 == 2 && rd >= 8 && rd <= 15 && encode_c_addi4spn(rd, itype, out)) return true;
+        if (rd == 2 && rs1 == 2 && encode_c_addi16sp(itype, out)) return true;
+        if (rs1 == 0 && encode_c_li(rd, itype, out)) return true;
+        if (rd == rs1 && encode_c_addi(rd, itype, out)) return true;
+    }
+
+    if (opcode == 0b0010011 && funct3 == 0b001 && funct7 == 0 && rd == rs1) {
+        if (encode_c_slli(rd, itype & 0x1f, out)) return true;
+    }
+
+    if (opcode == 0b0010011 && funct3 == 0b101 && rd == rs1) {
+        if (funct7 == 0 && encode_c_srli(rd, itype & 0x1f, out)) return true;
+        if (funct7 == 32 && encode_c_srai(rd, itype & 0x1f, out)) return true;
+    }
+
+    if (opcode == 0b0010011 && funct3 == 0b111 && rd == rs1) {
+        if (encode_c_andi(rd, itype, out)) return true;
+    }
+
+    if (opcode == 0b0110111 && encode_c_lui(rd, utype, out)) return true;
+
+    if (opcode == 0b0000011 && funct3 == 0b010) {
+        if (rs1 == 2 && encode_c_lwsp(rd, itype, out)) return true;
+        if (encode_c_lw(rd, rs1, itype, out)) return true;
+    }
+
+    if (opcode == 0b0100011 && funct3 == 0b010) {
+        if (rs1 == 2 && encode_c_swsp(rs2, stype, out)) return true;
+        if (encode_c_sw(rs2, rs1, stype, out)) return true;
+    }
+
+    if (opcode == 0b1100111 && funct3 == 0b000 && itype == 0) {
+        if (rd == 0 && encode_c_jr(rs1, out)) return true;
+        if (rd == 1 && encode_c_jalr(rs1, out)) return true;
+    }
+
+    if (opcode == 0b1101111) {
+        if (rd == 0 && encode_c_j(jtype, false, out)) return true;
+        if (rd == 1 && encode_c_j(jtype, true, out)) return true;
+    }
+
+    if (opcode == 0b0110011 && funct3 == 0b000) {
+        if (funct7 == 0 && rs1 == 0 && encode_c_mv(rd, rs2, out)) return true;
+        if (funct7 == 0 && rd == rs1 && encode_c_add(rd, rs2, out)) return true;
+        if (funct7 == 32 && rd == rs1 && encode_c_sub(rd, rs2, out)) return true;
+    }
+
+    if (opcode == 0b0110011 && funct7 == 0 && rd == rs1) {
+        if (funct3 == 0b100 && encode_c_xor(rd, rs2, out)) return true;
+        if (funct3 == 0b110 && encode_c_or(rd, rs2, out)) return true;
+        if (funct3 == 0b111 && encode_c_and(rd, rs2, out)) return true;
+    }
+
+    return false;
+}
+
+void asm_emit16(u16 inst, int linenum) {
     if (g_section == g_text) {
         *ARES_ARRAY_PUSH(&g_text_by_linenum) = linenum;
     }
 
     asm_emit_byte(inst >> 0, linenum);
     asm_emit_byte(inst >> 8, linenum);
+}
+
+void asm_emit32_raw(u32 inst, int linenum) {
+    if (g_section == g_text) {
+        *ARES_ARRAY_PUSH(&g_text_by_linenum) = linenum;
+        *ARES_ARRAY_PUSH(&g_text_by_linenum) = 0;
+    }
+
+    asm_emit_byte(inst >> 0, linenum);
+    asm_emit_byte(inst >> 8, linenum);
     asm_emit_byte(inst >> 16, linenum);
     asm_emit_byte(inst >> 24, linenum);
+}
+
+void asm_emit(u32 inst, int linenum) {
+    u16 compressed;
+    if (g_section == g_text && !g_in_fixup && try_compress(inst, &compressed)) {
+        asm_emit16(compressed, linenum);
+        return;
+    }
+
+    asm_emit32_raw(inst, linenum);
+}
+
+static bool encode_c_addi4spn(int rd, i32 imm, u16 *out) {
+    if (rd < 8 || rd > 15) return false;
+    if (imm <= 0 || imm > 1020 || (imm & 3)) return false;
+    u32 imm_bits = (u32)imm >> 2;
+
+    u16 inst = 0;
+    inst |= 0b000 << 13;
+    inst |= ((imm_bits >> 3) & 0x1) << 12;  // imm[5]
+    inst |= ((imm_bits >> 2) & 0x1) << 11;  // imm[4]
+    inst |= ((imm_bits >> 7) & 0x1) << 10;  // imm[9]
+    inst |= ((imm_bits >> 6) & 0x1) << 9;   // imm[8]
+    inst |= ((imm_bits >> 5) & 0x1) << 8;   // imm[7]
+    inst |= ((imm_bits >> 4) & 0x1) << 7;   // imm[6]
+    inst |= ((imm_bits >> 0) & 0x1) << 6;   // imm[2]
+    inst |= ((imm_bits >> 1) & 0x1) << 5;   // imm[3]
+    inst |= (u16)((rd - 8) & 0x7) << 2;
+    inst |= 0b00;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_lw(int rd, int rs1, i32 imm, u16 *out) {
+    if (rd < 8 || rd > 15 || rs1 < 8 || rs1 > 15) return false;
+    if (imm < 0 || imm > 124 || (imm & 3)) return false;
+    u32 imm_bits = (u32)imm >> 2;
+
+    u16 inst = 0;
+    inst |= 0b010 << 13;
+    inst |= (u16)((imm_bits >> 1) & 0x7) << 10;  // imm[5:3]
+    inst |= (u16)((rs1 - 8) & 0x7) << 7;
+    inst |= (u16)((imm_bits >> 0) & 0x1) << 6;   // imm[2]
+    inst |= (u16)((imm_bits >> 4) & 0x1) << 5;   // imm[6]
+    inst |= (u16)((rd - 8) & 0x7) << 2;
+    inst |= 0b00;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_sw(int rs2, int rs1, i32 imm, u16 *out) {
+    if (rs2 < 8 || rs2 > 15 || rs1 < 8 || rs1 > 15) return false;
+    if (imm < 0 || imm > 124 || (imm & 3)) return false;
+    u32 imm_bits = (u32)imm >> 2;
+
+    u16 inst = 0;
+    inst |= 0b110 << 13;
+    inst |= (u16)((imm_bits >> 1) & 0x7) << 10;  // imm[5:3]
+    inst |= (u16)((rs1 - 8) & 0x7) << 7;
+    inst |= (u16)((imm_bits >> 0) & 0x1) << 6;   // imm[2]
+    inst |= (u16)((imm_bits >> 4) & 0x1) << 5;   // imm[6]
+    inst |= (u16)((rs2 - 8) & 0x7) << 2;
+    inst |= 0b00;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_addi(int rd, i32 imm, u16 *out) {
+    if (rd == 0 && imm != 0) return false;
+    if (imm < -32 || imm > 31) return false;
+    u32 imm_bits = (u32)imm & 0x3f;
+
+    u16 inst = 0;
+    inst |= 0b000 << 13;
+    inst |= (u16)((imm_bits >> 5) & 0x1) << 12;
+    inst |= (u16)(rd & 0x1f) << 7;
+    inst |= (u16)(imm_bits & 0x1f) << 2;
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_li(int rd, i32 imm, u16 *out) {
+    if (rd == 0) return false;
+    if (imm < -32 || imm > 31) return false;
+    u32 imm_bits = (u32)imm & 0x3f;
+
+    u16 inst = 0;
+    inst |= 0b010 << 13;
+    inst |= (u16)((imm_bits >> 5) & 0x1) << 12;
+    inst |= (u16)(rd & 0x1f) << 7;
+    inst |= (u16)(imm_bits & 0x1f) << 2;
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_lui(int rd, i32 imm, u16 *out) {
+    if (rd == 0 || rd == 2) return false;
+
+    i32 imm6 = 0;
+    if ((imm & 0xfff) == 0) {
+        imm6 = imm >> 12;
+    } else {
+        imm6 = imm;
+    }
+    if (imm6 < -32 || imm6 > 31 || imm6 == 0) return false;
+    u32 imm_bits = (u32)imm6 & 0x3f;
+
+    u16 inst = 0;
+    inst |= 0b011 << 13;
+    inst |= (u16)((imm_bits >> 5) & 0x1) << 12;
+    inst |= (u16)(rd & 0x1f) << 7;
+    inst |= (u16)(imm_bits & 0x1f) << 2;
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_addi16sp(i32 imm, u16 *out) {
+    if ((imm & 0xf) != 0) return false;
+    i32 imm6 = imm >> 4;
+    if (imm6 < -32 || imm6 > 31 || imm6 == 0) return false;
+    u32 imm_bits = (u32)imm6 & 0x3f;
+
+    u16 inst = 0;
+    inst |= 0b011 << 13;
+    inst |= (u16)((imm_bits >> 5) & 0x1) << 12;  // imm[9]
+    inst |= (u16)(2 & 0x1f) << 7;                // rd=x2
+    inst |= (u16)((imm_bits >> 0) & 0x1) << 6;   // imm[4]
+    inst |= (u16)((imm_bits >> 2) & 0x1) << 5;   // imm[6]
+    inst |= (u16)((imm_bits >> 4) & 0x1) << 4;   // imm[8]
+    inst |= (u16)((imm_bits >> 3) & 0x1) << 3;   // imm[7]
+    inst |= (u16)((imm_bits >> 1) & 0x1) << 2;   // imm[5]
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_srli(int rd, u32 shamt, u16 *out) {
+    if (rd < 8 || rd > 15) return false;
+    if (shamt > 31) return false;
+    u32 imm_bits = shamt & 0x3f;
+    if (imm_bits & 0x20) return false;
+
+    u16 inst = 0;
+    inst |= 0b100 << 13;
+    inst |= (u16)((imm_bits >> 5) & 0x1) << 12;
+    inst |= 0b00 << 10;
+    inst |= (u16)((rd - 8) & 0x7) << 7;
+    inst |= (u16)(imm_bits & 0x1f) << 2;
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_srai(int rd, u32 shamt, u16 *out) {
+    if (rd < 8 || rd > 15) return false;
+    if (shamt > 31) return false;
+    u32 imm_bits = shamt & 0x3f;
+    if (imm_bits & 0x20) return false;
+
+    u16 inst = 0;
+    inst |= 0b100 << 13;
+    inst |= (u16)((imm_bits >> 5) & 0x1) << 12;
+    inst |= 0b01 << 10;
+    inst |= (u16)((rd - 8) & 0x7) << 7;
+    inst |= (u16)(imm_bits & 0x1f) << 2;
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_andi(int rd, i32 imm, u16 *out) {
+    if (rd < 8 || rd > 15) return false;
+    if (imm < -32 || imm > 31) return false;
+    u32 imm_bits = (u32)imm & 0x3f;
+
+    u16 inst = 0;
+    inst |= 0b100 << 13;
+    inst |= (u16)((imm_bits >> 5) & 0x1) << 12;
+    inst |= 0b10 << 10;
+    inst |= (u16)((rd - 8) & 0x7) << 7;
+    inst |= (u16)(imm_bits & 0x1f) << 2;
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_sub(int rd, int rs2, u16 *out) {
+    if (rd < 8 || rd > 15 || rs2 < 8 || rs2 > 15) return false;
+
+    u16 inst = 0;
+    inst |= 0b100 << 13;
+    inst |= 0b0 << 12;
+    inst |= 0b11 << 10;
+    inst |= (u16)((rd - 8) & 0x7) << 7;
+    inst |= 0b00 << 5;
+    inst |= (u16)((rs2 - 8) & 0x7) << 2;
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_xor(int rd, int rs2, u16 *out) {
+    if (rd < 8 || rd > 15 || rs2 < 8 || rs2 > 15) return false;
+
+    u16 inst = 0;
+    inst |= 0b100 << 13;
+    inst |= 0b0 << 12;
+    inst |= 0b11 << 10;
+    inst |= (u16)((rd - 8) & 0x7) << 7;
+    inst |= 0b01 << 5;
+    inst |= (u16)((rs2 - 8) & 0x7) << 2;
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_or(int rd, int rs2, u16 *out) {
+    if (rd < 8 || rd > 15 || rs2 < 8 || rs2 > 15) return false;
+
+    u16 inst = 0;
+    inst |= 0b100 << 13;
+    inst |= 0b0 << 12;
+    inst |= 0b11 << 10;
+    inst |= (u16)((rd - 8) & 0x7) << 7;
+    inst |= 0b10 << 5;
+    inst |= (u16)((rs2 - 8) & 0x7) << 2;
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_and(int rd, int rs2, u16 *out) {
+    if (rd < 8 || rd > 15 || rs2 < 8 || rs2 > 15) return false;
+
+    u16 inst = 0;
+    inst |= 0b100 << 13;
+    inst |= 0b0 << 12;
+    inst |= 0b11 << 10;
+    inst |= (u16)((rd - 8) & 0x7) << 7;
+    inst |= 0b11 << 5;
+    inst |= (u16)((rs2 - 8) & 0x7) << 2;
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_j(i32 imm, bool link, u16 *out) {
+    if (imm & 1) return false;
+    if (imm < -2048 || imm > 2046) return false;
+    u32 imm_bits = (u32)(imm >> 1) & 0x7ff;
+
+    u16 inst = 0;
+    inst |= (link ? 0b001 : 0b101) << 13;
+    inst |= (u16)((imm_bits >> 10) & 0x1) << 12;  // imm[11]
+    inst |= (u16)((imm_bits >> 3) & 0x1) << 11;   // imm[4]
+    inst |= (u16)((imm_bits >> 8) & 0x1) << 10;   // imm[9]
+    inst |= (u16)((imm_bits >> 7) & 0x1) << 9;    // imm[8]
+    inst |= (u16)((imm_bits >> 9) & 0x1) << 8;    // imm[10]
+    inst |= (u16)((imm_bits >> 5) & 0x1) << 7;    // imm[6]
+    inst |= (u16)((imm_bits >> 6) & 0x1) << 6;    // imm[7]
+    inst |= (u16)((imm_bits >> 2) & 0x1) << 5;    // imm[3]
+    inst |= (u16)((imm_bits >> 1) & 0x1) << 4;    // imm[2]
+    inst |= (u16)((imm_bits >> 0) & 0x1) << 3;    // imm[1]
+    inst |= (u16)((imm_bits >> 4) & 0x1) << 2;    // imm[5]
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_beqz(int rs1, i32 imm, u16 *out) {
+    if (rs1 < 8 || rs1 > 15) return false;
+    if (imm & 1) return false;
+    if (imm < -256 || imm > 254) return false;
+    u32 imm_bits = (u32)(imm >> 1) & 0x1ff;
+
+    u16 inst = 0;
+    inst |= 0b110 << 13;
+    inst |= (u16)((imm_bits >> 8) & 0x1) << 12;  // imm[8]
+    inst |= (u16)((imm_bits >> 3) & 0x1) << 11;  // imm[4]
+    inst |= (u16)((imm_bits >> 2) & 0x1) << 10;  // imm[3]
+    inst |= (u16)((rs1 - 8) & 0x7) << 7;
+    inst |= (u16)((imm_bits >> 6) & 0x1) << 6;   // imm[7]
+    inst |= (u16)((imm_bits >> 5) & 0x1) << 5;   // imm[6]
+    inst |= (u16)((imm_bits >> 1) & 0x1) << 4;   // imm[2]
+    inst |= (u16)((imm_bits >> 0) & 0x1) << 3;   // imm[1]
+    inst |= (u16)((imm_bits >> 4) & 0x1) << 2;   // imm[5]
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_bnez(int rs1, i32 imm, u16 *out) {
+    if (rs1 < 8 || rs1 > 15) return false;
+    if (imm & 1) return false;
+    if (imm < -256 || imm > 254) return false;
+    u32 imm_bits = (u32)(imm >> 1) & 0x1ff;
+
+    u16 inst = 0;
+    inst |= 0b111 << 13;
+    inst |= (u16)((imm_bits >> 8) & 0x1) << 12;  // imm[8]
+    inst |= (u16)((imm_bits >> 3) & 0x1) << 11;  // imm[4]
+    inst |= (u16)((imm_bits >> 2) & 0x1) << 10;  // imm[3]
+    inst |= (u16)((rs1 - 8) & 0x7) << 7;
+    inst |= (u16)((imm_bits >> 6) & 0x1) << 6;   // imm[7]
+    inst |= (u16)((imm_bits >> 5) & 0x1) << 5;   // imm[6]
+    inst |= (u16)((imm_bits >> 1) & 0x1) << 4;   // imm[2]
+    inst |= (u16)((imm_bits >> 0) & 0x1) << 3;   // imm[1]
+    inst |= (u16)((imm_bits >> 4) & 0x1) << 2;   // imm[5]
+    inst |= 0b01;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_slli(int rd, u32 shamt, u16 *out) {
+    if (rd == 0) return false;
+    if (shamt > 31) return false;
+    u32 imm_bits = shamt & 0x3f;
+    if (imm_bits & 0x20) return false;
+
+    u16 inst = 0;
+    inst |= 0b000 << 13;
+    inst |= (u16)((imm_bits >> 5) & 0x1) << 12;
+    inst |= (u16)(rd & 0x1f) << 7;
+    inst |= (u16)(imm_bits & 0x1f) << 2;
+    inst |= 0b10;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_lwsp(int rd, i32 imm, u16 *out) {
+    if (rd == 0) return false;
+    if (imm < 0 || imm > 252 || (imm & 3)) return false;
+    u32 imm_bits = (u32)imm >> 2;
+
+    u16 inst = 0;
+    inst |= 0b010 << 13;
+    inst |= (u16)((imm_bits >> 3) & 0x1) << 12;  // imm[5]
+    inst |= (u16)(rd & 0x1f) << 7;
+    inst |= (u16)((imm_bits >> 0) & 0x7) << 4;   // imm[4:2]
+    inst |= (u16)((imm_bits >> 4) & 0x3) << 2;   // imm[7:6]
+    inst |= 0b10;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_swsp(int rs2, i32 imm, u16 *out) {
+    if (imm < 0 || imm > 252 || (imm & 3)) return false;
+    u32 imm_bits = (u32)imm >> 2;
+
+    u16 inst = 0;
+    inst |= 0b110 << 13;
+    inst |= (u16)((imm_bits >> 3) & 0x1) << 12;  // imm[5]
+    inst |= (u16)((imm_bits >> 2) & 0x1) << 11;  // imm[4]
+    inst |= (u16)((imm_bits >> 1) & 0x1) << 10;  // imm[3]
+    inst |= (u16)((imm_bits >> 0) & 0x1) << 9;   // imm[2]
+    inst |= (u16)((imm_bits >> 5) & 0x1) << 8;   // imm[7]
+    inst |= (u16)((imm_bits >> 4) & 0x1) << 7;   // imm[6]
+    inst |= (u16)(rs2 & 0x1f) << 2;
+    inst |= 0b10;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_jr(int rs1, u16 *out) {
+    if (rs1 == 0) return false;
+
+    u16 inst = 0;
+    inst |= 0b100 << 13;
+    inst |= 0b0 << 12;
+    inst |= (u16)(rs1 & 0x1f) << 7;
+    inst |= 0b0 << 2;
+    inst |= 0b10;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_jalr(int rs1, u16 *out) {
+    if (rs1 == 0) return false;
+
+    u16 inst = 0;
+    inst |= 0b100 << 13;
+    inst |= 0b1 << 12;
+    inst |= (u16)(rs1 & 0x1f) << 7;
+    inst |= 0b0 << 2;
+    inst |= 0b10;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_mv(int rd, int rs2, u16 *out) {
+    if (rd == 0 || rs2 == 0) return false;
+
+    u16 inst = 0;
+    inst |= 0b100 << 13;
+    inst |= 0b0 << 12;
+    inst |= (u16)(rd & 0x1f) << 7;
+    inst |= (u16)(rs2 & 0x1f) << 2;
+    inst |= 0b10;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_add(int rd, int rs2, u16 *out) {
+    if (rd == 0 || rs2 == 0) return false;
+
+    u16 inst = 0;
+    inst |= 0b100 << 13;
+    inst |= 0b1 << 12;
+    inst |= (u16)(rd & 0x1f) << 7;
+    inst |= (u16)(rs2 & 0x1f) << 2;
+    inst |= 0b10;
+    *out = inst;
+    return true;
+}
+
+static bool encode_c_ebreak(u16 *out) {
+    *out = (u16)((0b100 << 13) | (1 << 12) | 0b10);
+    return true;
 }
 
 static Extern *get_extern(const char *sym, size_t sym_len) {
@@ -692,7 +1240,7 @@ const char *handle_branch(Parser *p, const char *opcode, size_t opcode_len) {
                             &later, reloc_branch);
     if (err) return err;
     if (later) {
-        asm_emit(0, p->startline);
+        asm_emit32_raw(0, p->startline);
         return NULL;
     }
     i32 simm = addr - (g_section->emit_idx + g_section->base);
@@ -729,7 +1277,7 @@ const char *handle_branch_zero(Parser *p, const char *opcode,
                             &addr, &later, reloc_branch);
     if (err) return err;
     if (later) {
-        asm_emit(0, p->startline);
+        asm_emit32_raw(0, p->startline);
         return NULL;
     }
     i32 simm = addr - (g_section->emit_idx + g_section->base);
@@ -799,7 +1347,7 @@ const char *handle_jump(Parser *p, const char *opcode, size_t opcode_len) {
                 reloc_jal);
     if (err) return err;
     if (later) {
-        asm_emit(0, p->startline);
+        asm_emit32_raw(0, p->startline);
         return NULL;
     }
     i32 simm = addr - (g_section->emit_idx + g_section->base);
@@ -917,8 +1465,8 @@ const char *handle_la(Parser *p, const char *opcode, size_t opcode_len) {
     const char *err = label(p, &orig, handle_la, opcode, opcode_len, &addr,
                             &later, reloc_hi20lo12i);
     if (later) {
-        asm_emit(0, p->startline);
-        asm_emit(0, p->startline);
+        asm_emit32_raw(0, p->startline);
+        asm_emit32_raw(0, p->startline);
         return NULL;
     }
     if (err) return err;
@@ -999,6 +1547,473 @@ const char *handle_csr_imm(Parser *p, const char *opcode, size_t opcode_len) {
     return NULL;
 }
 
+const char *handle_c_addi4spn(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd;
+    i32 imm;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+
+    skip_whitespace(p);
+    if (!parse_numeric(p, &imm)) {
+        int rs1 = parse_reg(p);
+        if (rs1 == -1) return "Invalid imm";
+        if (rs1 != 2) return "Expected sp";
+        skip_whitespace(p);
+        if (!consume_if(p, ',')) return "Expected ,";
+        skip_whitespace(p);
+        if (!parse_numeric(p, &imm)) return "Invalid imm";
+    }
+
+    u16 inst;
+    if (!encode_c_addi4spn(rd, imm, &inst)) return "Invalid c.addi4spn";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_lw(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd, rs1;
+    i32 imm;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if (!parse_numeric(p, &imm)) return "Invalid imm";
+    skip_whitespace(p);
+    if (!consume_if(p, '(')) return "Expected (";
+    skip_whitespace(p);
+    if ((rs1 = parse_reg(p)) == -1) return "Invalid rs1";
+    skip_whitespace(p);
+    if (!consume_if(p, ')')) return "Expected )";
+
+    u16 inst;
+    if (!encode_c_lw(rd, rs1, imm, &inst)) return "Invalid c.lw";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_sw(Parser *p, const char *opcode, size_t opcode_len) {
+    int rs2, rs1;
+    i32 imm;
+
+    skip_whitespace(p);
+    if ((rs2 = parse_reg(p)) == -1) return "Invalid rs2";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if (!parse_numeric(p, &imm)) return "Invalid imm";
+    skip_whitespace(p);
+    if (!consume_if(p, '(')) return "Expected (";
+    skip_whitespace(p);
+    if ((rs1 = parse_reg(p)) == -1) return "Invalid rs1";
+    skip_whitespace(p);
+    if (!consume_if(p, ')')) return "Expected )";
+
+    u16 inst;
+    if (!encode_c_sw(rs2, rs1, imm, &inst)) return "Invalid c.sw";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_addi(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd;
+    i32 imm;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if (!parse_numeric(p, &imm)) return "Invalid imm";
+
+    u16 inst;
+    if (!encode_c_addi(rd, imm, &inst)) return "Invalid c.addi";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_nop(Parser *p, const char *opcode, size_t opcode_len) {
+    u16 inst;
+    encode_c_addi(0, 0, &inst);
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_li(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd;
+    i32 imm;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if (!parse_numeric(p, &imm)) return "Invalid imm";
+
+    u16 inst;
+    if (!encode_c_li(rd, imm, &inst)) return "Invalid c.li";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_lui(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd;
+    i32 imm;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if (!parse_numeric(p, &imm)) return "Invalid imm";
+
+    u16 inst;
+    if (!encode_c_lui(rd, imm, &inst)) return "Invalid c.lui";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_addi16sp(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd;
+    i32 imm;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    if (rd != 2) return "Expected sp";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if (!parse_numeric(p, &imm)) return "Invalid imm";
+
+    u16 inst;
+    if (!encode_c_addi16sp(imm, &inst)) return "Invalid c.addi16sp";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_srli(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd;
+    i32 imm;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if (!parse_numeric(p, &imm)) return "Invalid imm";
+    if (imm < 0) return "Invalid imm";
+
+    u16 inst;
+    if (!encode_c_srli(rd, (u32)imm, &inst)) return "Invalid c.srli";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_srai(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd;
+    i32 imm;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if (!parse_numeric(p, &imm)) return "Invalid imm";
+    if (imm < 0) return "Invalid imm";
+
+    u16 inst;
+    if (!encode_c_srai(rd, (u32)imm, &inst)) return "Invalid c.srai";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_andi(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd;
+    i32 imm;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if (!parse_numeric(p, &imm)) return "Invalid imm";
+
+    u16 inst;
+    if (!encode_c_andi(rd, imm, &inst)) return "Invalid c.andi";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_sub(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd, rs2;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if ((rs2 = parse_reg(p)) == -1) return "Invalid rs2";
+
+    u16 inst;
+    if (!encode_c_sub(rd, rs2, &inst)) return "Invalid c.sub";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_xor(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd, rs2;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if ((rs2 = parse_reg(p)) == -1) return "Invalid rs2";
+
+    u16 inst;
+    if (!encode_c_xor(rd, rs2, &inst)) return "Invalid c.xor";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_or(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd, rs2;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if ((rs2 = parse_reg(p)) == -1) return "Invalid rs2";
+
+    u16 inst;
+    if (!encode_c_or(rd, rs2, &inst)) return "Invalid c.or";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_and(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd, rs2;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if ((rs2 = parse_reg(p)) == -1) return "Invalid rs2";
+
+    u16 inst;
+    if (!encode_c_and(rd, rs2, &inst)) return "Invalid c.and";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *reloc_rvc_jump(const char *sym, size_t sym_len) {
+    Extern *e = get_extern(sym, sym_len);
+    Relocation *r = ARES_ARRAY_PUSH(&g_section->relocations);
+    r->symbol = e;
+    r->addend = 0;
+    r->offset = g_section->emit_idx;
+    r->type = R_RISCV_RVC_JUMP;
+    return NULL;
+}
+
+const char *reloc_rvc_branch(const char *sym, size_t sym_len) {
+    Extern *e = get_extern(sym, sym_len);
+    Relocation *r = ARES_ARRAY_PUSH(&g_section->relocations);
+    r->symbol = e;
+    r->addend = 0;
+    r->offset = g_section->emit_idx;
+    r->type = R_RISCV_RVC_BRANCH;
+    return NULL;
+}
+
+const char *handle_c_jump(Parser *p, const char *opcode, size_t opcode_len) {
+    Parser orig = *p;
+    u32 addr;
+    bool later;
+
+    skip_whitespace(p);
+    const char *err = label(p, &orig, handle_c_jump, opcode, opcode_len, &addr,
+                            &later, reloc_rvc_jump);
+    if (err) return err;
+    if (later) {
+        asm_emit16(0, p->startline);
+        return NULL;
+    }
+    i32 simm = addr - (g_section->emit_idx + g_section->base);
+
+    u16 inst;
+    bool link = str_eq_case(opcode, opcode_len, "c.jal");
+    if (!encode_c_j(simm, link, &inst)) return "Invalid c.j/c.jal";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_branch(Parser *p, const char *opcode, size_t opcode_len) {
+    Parser orig = *p;
+    u32 addr;
+    int rs1;
+    bool later;
+
+    skip_whitespace(p);
+    if ((rs1 = parse_reg(p)) == -1) return "Invalid rs1";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+
+    const char *err = label(p, &orig, handle_c_branch, opcode, opcode_len, &addr,
+                            &later, reloc_rvc_branch);
+    if (err) return err;
+    if (later) {
+        asm_emit16(0, p->startline);
+        return NULL;
+    }
+    i32 simm = addr - (g_section->emit_idx + g_section->base);
+
+    u16 inst;
+    if (str_eq_case(opcode, opcode_len, "c.beqz")) {
+        if (!encode_c_beqz(rs1, simm, &inst)) return "Invalid c.beqz";
+    } else {
+        if (!encode_c_bnez(rs1, simm, &inst)) return "Invalid c.bnez";
+    }
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_slli(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd;
+    i32 imm;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if (!parse_numeric(p, &imm)) return "Invalid imm";
+    if (imm < 0) return "Invalid imm";
+
+    u16 inst;
+    if (!encode_c_slli(rd, (u32)imm, &inst)) return "Invalid c.slli";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_lwsp(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd, rs1;
+    i32 imm;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if (!parse_numeric(p, &imm)) return "Invalid imm";
+    skip_whitespace(p);
+    if (!consume_if(p, '(')) return "Expected (";
+    skip_whitespace(p);
+    if ((rs1 = parse_reg(p)) == -1) return "Invalid rs1";
+    if (rs1 != 2) return "Expected sp";
+    skip_whitespace(p);
+    if (!consume_if(p, ')')) return "Expected )";
+
+    u16 inst;
+    if (!encode_c_lwsp(rd, imm, &inst)) return "Invalid c.lwsp";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_swsp(Parser *p, const char *opcode, size_t opcode_len) {
+    int rs2, rs1;
+    i32 imm;
+
+    skip_whitespace(p);
+    if ((rs2 = parse_reg(p)) == -1) return "Invalid rs2";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if (!parse_numeric(p, &imm)) return "Invalid imm";
+    skip_whitespace(p);
+    if (!consume_if(p, '(')) return "Expected (";
+    skip_whitespace(p);
+    if ((rs1 = parse_reg(p)) == -1) return "Invalid rs1";
+    if (rs1 != 2) return "Expected sp";
+    skip_whitespace(p);
+    if (!consume_if(p, ')')) return "Expected )";
+
+    u16 inst;
+    if (!encode_c_swsp(rs2, imm, &inst)) return "Invalid c.swsp";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_jr(Parser *p, const char *opcode, size_t opcode_len) {
+    int rs1;
+
+    skip_whitespace(p);
+    if ((rs1 = parse_reg(p)) == -1) return "Invalid rs1";
+
+    u16 inst;
+    if (!encode_c_jr(rs1, &inst)) return "Invalid c.jr";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_jalr(Parser *p, const char *opcode, size_t opcode_len) {
+    int rs1;
+
+    skip_whitespace(p);
+    if ((rs1 = parse_reg(p)) == -1) return "Invalid rs1";
+
+    u16 inst;
+    if (!encode_c_jalr(rs1, &inst)) return "Invalid c.jalr";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_mv(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd, rs2;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if ((rs2 = parse_reg(p)) == -1) return "Invalid rs2";
+
+    u16 inst;
+    if (!encode_c_mv(rd, rs2, &inst)) return "Invalid c.mv";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_add(Parser *p, const char *opcode, size_t opcode_len) {
+    int rd, rs2;
+
+    skip_whitespace(p);
+    if ((rd = parse_reg(p)) == -1) return "Invalid rd";
+    skip_whitespace(p);
+    if (!consume_if(p, ',')) return "Expected ,";
+    skip_whitespace(p);
+    if ((rs2 = parse_reg(p)) == -1) return "Invalid rs2";
+
+    u16 inst;
+    if (!encode_c_add(rd, rs2, &inst)) return "Invalid c.add";
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
+const char *handle_c_ebreak(Parser *p, const char *opcode, size_t opcode_len) {
+    u16 inst;
+    encode_c_ebreak(&inst);
+    asm_emit16(inst, p->startline);
+    return NULL;
+}
+
 typedef struct OpcodeHandling {
     DeferredInsnCb *cb;
     const char *opcodes[64];
@@ -1028,6 +2043,31 @@ OpcodeHandling opcode_types[] = {
     {handle_csr, {"csrrw", "csrrs", "csrrc"}},
     {handle_csr_imm, {"csrrwi", "csrrsi", "csrrci"}},
     {handle_sret, {"sret"}},
+    {handle_c_addi4spn, {"c.addi4spn"}},
+    {handle_c_lw, {"c.lw"}},
+    {handle_c_sw, {"c.sw"}},
+    {handle_c_addi, {"c.addi"}},
+    {handle_c_nop, {"c.nop"}},
+    {handle_c_li, {"c.li"}},
+    {handle_c_lui, {"c.lui"}},
+    {handle_c_addi16sp, {"c.addi16sp"}},
+    {handle_c_srli, {"c.srli"}},
+    {handle_c_srai, {"c.srai"}},
+    {handle_c_andi, {"c.andi"}},
+    {handle_c_sub, {"c.sub"}},
+    {handle_c_xor, {"c.xor"}},
+    {handle_c_or, {"c.or"}},
+    {handle_c_and, {"c.and"}},
+    {handle_c_jump, {"c.j", "c.jal"}},
+    {handle_c_branch, {"c.beqz", "c.bnez"}},
+    {handle_c_slli, {"c.slli"}},
+    {handle_c_lwsp, {"c.lwsp"}},
+    {handle_c_swsp, {"c.swsp"}},
+    {handle_c_jr, {"c.jr"}},
+    {handle_c_jalr, {"c.jalr"}},
+    {handle_c_mv, {"c.mv"}},
+    {handle_c_add, {"c.add"}},
+    {handle_c_ebreak, {"c.ebreak"}},
 };
 
 // defining _start but not making it global is a VERY common mistake
@@ -1167,7 +2207,7 @@ export void assemble(const char *txt, size_t s, bool allow_externs) {
                         .limit = TEXT_END,
                         .contents = ARES_ARRAY_NEW(u8),
                         .emit_idx = 0,
-                        .align = 4,
+                        .align = 2,
                         .relocations = ARES_ARRAY_NEW(Relocation),
                         .read = true,
                         .write = false,
@@ -1206,7 +2246,7 @@ export void assemble(const char *txt, size_t s, bool allow_externs) {
                                .limit = KERNEL_TEXT_END,
                                .contents = ARES_ARRAY_NEW(u8),
                                .emit_idx = 0,
-                               .align = 1,
+                               .align = 2,
                                .relocations = ARES_ARRAY_NEW(Relocation),
                                .read = true,
                                .write = false,
@@ -1324,7 +2364,7 @@ export void assemble(const char *txt, size_t s, bool allow_externs) {
                             err = "Invalid word";
                             break;
                         }
-                        asm_emit(value, p->startline);
+                        asm_emit32_raw((u32)value, p->startline);
                     } else break;
                     first = false;
                 }

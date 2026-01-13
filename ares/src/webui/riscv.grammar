@@ -107,7 +107,14 @@ RegisterExpression {
       "lui" | "auipc" |
       "li" |
       "la" |
-      "ecall"
+      "ecall" |
+      "c.addi4spn" | "c.lw" | "c.sw" |
+      "c.addi" | "c.nop" | "c.li" | "c.lui" | "c.addi16sp" |
+      "c.srli" | "c.srai" | "c.andi" |
+      "c.sub" | "c.xor" | "c.or" | "c.and" |
+      "c.j" | "c.jal" | "c.beqz" | "c.bnez" |
+      "c.slli" | "c.lwsp" | "c.swsp" |
+      "c.jr" | "c.jalr" | "c.mv" | "c.add" | "c.ebreak"
     ) (spaces | newline | @eof)
   }
 
