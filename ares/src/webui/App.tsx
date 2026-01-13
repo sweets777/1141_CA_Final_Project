@@ -233,21 +233,33 @@ function initVgaCanvas(): boolean {
 	return true;
 }
 
-function ensureVgaWindow(openIfNeeded: boolean): boolean {
+async function ensureVgaReady(): Promise<boolean> {
 	if (vgaCanvas && vgaCtx && vgaImageData) {
 		return true;
 	}
-	if (!openIfNeeded) {
-		alert("VGA window is closed. Reopen it from the GIF button.");
+	setVgaVisible(true);
+	await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+	if (!vgaCanvas) {
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+	}
+	if (vgaCanvas && (!vgaCtx || !vgaImageData)) {
+		return initVgaCanvas();
+	}
+	if (!vgaCanvas) {
+		alert("Unable to create VGA canvas.");
 		return false;
 	}
-	setVgaVisible(true);
-	return initVgaCanvas();
+	return true;
 }
 
 function closeVgaWindow(): void {
 	stopVgaPlayback();
 	setVgaVisible(false);
+	vgaCtx = null;
+	vgaImageData = null;
+	if (vgaStatus) {
+		vgaStatus.textContent = "Waiting for GIF...";
+	}
 }
 
 function renderVga(): void {
@@ -276,7 +288,7 @@ async function loadGifToVga(file: File): Promise<void> {
 		alert("VGA buffer is smaller than expected.");
 		return;
 	}
-	if (!ensureVgaWindow(true)) return;
+	if (!(await ensureVgaReady())) return;
 
 	if (vgaStatus) {
 		vgaStatus.textContent = `Loading ${file.name}...`;
