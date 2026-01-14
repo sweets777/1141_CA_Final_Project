@@ -198,6 +198,8 @@ extern export u32 g_gif_base_addr;
 extern export u32 g_gif_len;
 extern export u32 g_gif_ptr;
 extern export u32 g_gif_used;
+extern export u32 g_gif_body_ptr;
+extern export u32 g_gif_body_len;
 
 extern ARES_ARRAY(SectionPtr) g_sections;
 extern ARES_ARRAY(LabelData) g_labels;

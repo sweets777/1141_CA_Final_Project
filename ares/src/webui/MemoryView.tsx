@@ -1,7 +1,7 @@
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Component, createSignal, onMount, createEffect, For, Show } from "solid-js";
 import { TabSelector } from "./TabSelector";
-import { DATA_BASE, shadowStackAugmented, ShadowStackAugmentedEnt, STACK_LEN, STACK_TOP, TEXT_BASE, wasmRuntime } from "./EmulatorState";
+import { DATA_BASE, GIF_BASE, shadowStackAugmented, ShadowStackAugmentedEnt, STACK_LEN, STACK_TOP, TEXT_BASE, wasmRuntime } from "./EmulatorState";
 const ROW_HEIGHT: number = 24;
 
 export const MemoryView: Component<{ version: () => any, writeAddr: number, writeLen: number, sp: number, load: (addr: number, pow: number) => number | null }> = (props) => {
@@ -64,13 +64,14 @@ export const MemoryView: Component<{ version: () => any, writeAddr: number, writ
     const getStartAddr = () => {
         if (activeTab() == ".text") return TEXT_BASE;
         else if (activeTab() == ".data") return DATA_BASE;
+        else if (activeTab() == ".gif") return GIF_BASE;
         else if (activeTab() == "stack") return STACK_TOP - 65536; // TODO: runtime stack size detection
         return 0;
     }
     // FIXME: selecting data should not also select the address column
     return (
         <div class="h-full flex flex-col" style={{ contain: "strict" }} onMouseDown={(e) => { setAddrSelect(-1); }}>
-            <TabSelector tab={activeTab()} setTab={setActiveTab} tabs={[".text", ".data", "stack", "frames"]} />
+            <TabSelector tab={activeTab()} setTab={setActiveTab} tabs={[".text", ".data", ".gif", "stack", "frames"]} />
             <div ref={parentRef} class="font-mono text-lg overflow-auto theme-scrollbar ml-2">
                 <div ref={dummyChunk} class="invisible absolute ">{"000000000"}</div>
                 <Show when={activeTab() == "frames"}>

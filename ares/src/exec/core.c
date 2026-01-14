@@ -17,6 +17,8 @@ export u32 g_gif_base_addr;
 export u32 g_gif_len;
 export u32 g_gif_ptr;
 export u32 g_gif_used;
+export u32 g_gif_body_ptr;
+export u32 g_gif_body_len;
 
 ARES_ARRAY(SectionPtr) g_sections = ARES_ARRAY_NEW(SectionPtr);
 ARES_ARRAY(Extern) g_externs = ARES_ARRAY_NEW(Extern);
@@ -2664,6 +2666,8 @@ void prepare_aux_sections() {
     g_gif_len = g_gif->contents.len;
     g_gif_ptr = (u32)(uintptr_t)g_gif->contents.buf;
     g_gif_used = 0;
+    g_gif_body_ptr = 0;
+    g_gif_body_len = 0;
 
     *ARES_ARRAY_PUSH(&g_sections) = g_stack;
     *ARES_ARRAY_PUSH(&g_sections) = g_mmio;

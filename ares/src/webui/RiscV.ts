@@ -31,6 +31,8 @@ interface WasmExports {
   g_gif_len: number;
   g_gif_ptr: number;
   g_gif_used: number;
+  g_gif_body_ptr: number;
+  g_gif_body_len: number;
 }
 
 const INSTRUCTION_LIMIT: number = 100 * 1000;
@@ -65,6 +67,8 @@ export class WasmInterface {
   public gifLen?: Uint32Array;
   public gifPtr?: Uint32Array;
   public gifUsed?: Uint32Array;
+  public gifBodyPtr?: Uint32Array;
+  public gifBodyLen?: Uint32Array;
 
   public emu_load: (addr: number, size: number) => number;
   public emu_store: (addr: number, val: number, size: number) => void;
@@ -152,6 +156,8 @@ export class WasmInterface {
     this.gifLen = this.createU32(this.exports.g_gif_len);
     this.gifPtr = this.createU32(this.exports.g_gif_ptr);
     this.gifUsed = this.createU32(this.exports.g_gif_used);
+    this.gifBodyPtr = this.createU32(this.exports.g_gif_body_ptr);
+    this.gifBodyLen = this.createU32(this.exports.g_gif_body_len);
     if (offset + strLen > this.memory.buffer.byteLength) {
       const pages = Math.ceil(
         (offset + strLen - this.memory.buffer.byteLength) / 65536,

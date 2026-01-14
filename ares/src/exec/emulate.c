@@ -17,6 +17,10 @@ export int g_exit_code;
 
 extern u32 g_runtime_error_params[2];
 extern Error g_runtime_error_type;
+extern Section *g_gif;
+extern u32 g_gif_used;
+extern u32 g_gif_body_ptr;
+extern u32 g_gif_body_len;
 
 static int g_privilege_level = PRIV_USER;
 
@@ -169,6 +173,62 @@ void STORE(u32 addr, u32 val, int size, bool *err) {
     *err = false;
 }
 
+#define GIF_STRIP_SYSCALL 100
+
+static bool gif_strip_header(u32 *body_ptr, u32 *body_len) {
+    if (!g_gif || g_gif_used < 13) return false;
+    u8 *buf = g_gif->contents.buf;
+    if (memcmp(buf, "GIF", 3) != 0) return false;
+    size_t pos = 6;
+    if (g_gif_used < pos + 7) return false;
+    u8 packed = buf[pos + 4];
+    pos += 7;
+    if (packed & 0x80) {
+        size_t gct_size = 3 * (1u << ((packed & 0x07) + 1));
+        if (pos + gct_size > g_gif_used) return false;
+        pos += gct_size;
+    }
+    while (pos < g_gif_used) {
+        u8 marker = buf[pos++];
+        if (marker == 0x2C) {
+            if (pos + 9 > g_gif_used) return false;
+            u8 local_packed = buf[pos + 8];
+            pos += 9;
+            if (local_packed & 0x80) {
+                size_t lct_size = 3 * (1u << ((local_packed & 0x07) + 1));
+                if (pos + lct_size > g_gif_used) return false;
+                pos += lct_size;
+            }
+            if (pos >= g_gif_used) return false;
+            pos += 1;
+            size_t data_start = pos;
+            while (pos < g_gif_used) {
+                u8 sub_len = buf[pos++];
+                if (sub_len == 0) break;
+                if (pos + sub_len > g_gif_used) return false;
+                pos += sub_len;
+            }
+            *body_ptr = g_gif->base + (u32)data_start;
+            *body_len = (u32)(pos - data_start);
+            return true;
+        } else if (marker == 0x21) {
+            if (pos >= g_gif_used) return false;
+            pos += 1;
+            while (pos < g_gif_used) {
+                u8 sub_len = buf[pos++];
+                if (sub_len == 0) break;
+                if (pos + sub_len > g_gif_used) return false;
+                pos += sub_len;
+            }
+        } else if (marker == 0x3B) {
+            break;
+        } else {
+            return false;
+        }
+    }
+    return false;
+}
+
 void do_syscall(u32 inst_len) {
     u32 scause = CAUSE_U_ECALL;
     if (g_privilege_level == PRIV_SUPERVISOR) {
@@ -223,6 +283,19 @@ void do_syscall(u32 inst_len) {
         for (int i = 31; i >= 0; i--) {
             putchar(((param >> i) & 1) ? '1' : '0');
         }
+    } else if (g_regs[17] == GIF_STRIP_SYSCALL) {
+        u32 body_ptr = 0;
+        u32 body_len = 0;
+        if (gif_strip_header(&body_ptr, &body_len)) {
+            g_gif_body_ptr = body_ptr;
+            g_gif_body_len = body_len;
+        } else {
+            g_gif_body_ptr = 0;
+            g_gif_body_len = 0;
+        }
+        g_regs[10] = g_gif_body_ptr;
+        g_regs[11] = g_gif_body_len;
+        g_reg_written = 11;
     } else if (g_regs[17] == 93 || g_regs[17] == 7 || g_regs[17] == 10) {
         emu_exit();
     }

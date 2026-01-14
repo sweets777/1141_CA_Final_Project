@@ -24,7 +24,7 @@ import { RegisterTable } from "./RegisterTable";
 import { MemoryView } from "./MemoryView";
 import { PaneResize } from "./PaneResize";
 import { githubLight, githubDark, Theme, Colors, githubHighlightStyle } from './GithubTheme'
-import { AsmErrState, buildAsm, continueStep, DebugState, ErrorState, fetchTestcases, getCurrentLine, IdleState, initialRegs, nextStep, quitDebug, RunningState, runNormal, runTestSuite, setWasmRuntime, singleStep, startStep, startStepTestSuite, StoppedState, testData, TestSuiteState, TestSuiteTableEntry, TEXT_BASE, wasmInterface, wasmRuntime, wasmTestsuite, wasmTestsuiteIdx } from "./EmulatorState";
+import { AsmErrState, buildAsm, continueStep, DebugState, ErrorState, fetchTestcases, getCurrentLine, IdleState, initialRegs, nextStep, quitDebug, RunningState, runNormal, runTestSuite, setWasmRuntime, singleStep, startAutoRun, startStep, startStepTestSuite, StoppedState, testData, TestSuiteState, TestSuiteTableEntry, TEXT_BASE, wasmInterface, wasmRuntime, wasmTestsuite, wasmTestsuiteIdx } from "./EmulatorState";
 import { highlightTree } from "@lezer/highlight";
 
 let parserWithMetadata = parser.configure({
@@ -197,6 +197,7 @@ const VGA_WIDTH = 160;
 const VGA_HEIGHT = 120;
 const VGA_SCALE = 3;
 const VGA_TITLE = "ARES VGA";
+const GIF_STRIP_SYSCALL = 100;
 
 let gifInputRef: HTMLInputElement;
 const [vgaVisible, setVgaVisible] = createSignal(false);
@@ -206,11 +207,16 @@ let vgaImageData: ImageData | null = null;
 let vgaStatus: HTMLDivElement | null = null;
 let vgaTimer: number | null = null;
 let vgaBuffer: Uint8Array | null = null;
+let gifAutoCancel: (() => void) | null = null;
 
 function stopVgaPlayback(): void {
 	if (vgaTimer !== null) {
 		clearTimeout(vgaTimer);
 		vgaTimer = null;
+	}
+	if (gifAutoCancel) {
+		gifAutoCancel();
+		gifAutoCancel = null;
 	}
 }
 
@@ -268,11 +274,93 @@ function renderVga(): void {
 	vgaCtx.putImageData(vgaImageData, 0, 0);
 }
 
+function buildGifAssembly(): string {
+	const vgaSize = VGA_WIDTH * VGA_HEIGHT * 4;
+	return `# Auto-generated GIF runner
+.text
+.globl _start
+_start:
+	li ra, 0
+	li sp, 0x7ffff000
+	li gp, 0
+	li tp, 0
+	li t0, 0
+	li t1, 0
+	li t2, 0
+	li s0, 0
+	li s1, 0
+	li a0, 0
+	li a1, 0
+	li a2, 0
+	li a3, 0
+	li a4, 0
+	li a5, 0
+	li a6, 0
+	li a7, 0
+	li s2, 0
+	li s3, 0
+	li s4, 0
+	li s5, 0
+	li s6, 0
+	li s7, 0
+	li s8, 0
+	li s9, 0
+	li s10, 0
+	li s11, 0
+	li t3, 0
+	li t4, 0
+	li t5, 0
+	li t6, 0
+	li a7, ${GIF_STRIP_SYSCALL}
+	ecall
+	beq a0, zero, done
+	mv s0, a0
+	mv s1, a1
+	la s2, _VGA_BASE
+	li s3, ${vgaSize}
+	bltu s1, s3, len_ok
+	mv s1, s3
+len_ok:
+	li t0, 0
+copy_loop:
+	beq t0, s1, done
+	lbu t1, 0(s0)
+	sb t1, 0(s2)
+	addi s0, s0, 1
+	addi s2, s2, 1
+	addi t0, t0, 1
+	j copy_loop
+done:
+	li a7, 93
+	li a0, 0
+	ecall
+`;
+}
+
 function openGifPicker(): void {
 	gifInputRef?.click();
 }
 
 async function loadGifToVga(file: File): Promise<void> {
+	if (!view) {
+		alert("Editor is not ready yet.");
+		return;
+	}
+	if (!(await ensureVgaReady())) return;
+	stopVgaPlayback();
+
+	if (vgaStatus) {
+		vgaStatus.textContent = `Loading ${file.name}...`;
+	}
+
+	const buffer = await file.arrayBuffer();
+	const gifBytes = new Uint8Array(buffer);
+
+	const asm = buildGifAssembly();
+	view.dispatch({
+		changes: { from: 0, to: view.state.doc.length, insert: asm }
+	});
+
 	await buildAsm(wasmRuntime, setWasmRuntime);
 	if (wasmRuntime.status == "asmerr") return;
 
@@ -288,13 +376,6 @@ async function loadGifToVga(file: File): Promise<void> {
 		alert("VGA buffer is smaller than expected.");
 		return;
 	}
-	if (!(await ensureVgaReady())) return;
-
-	if (vgaStatus) {
-		vgaStatus.textContent = `Loading ${file.name}...`;
-	}
-	const buffer = await file.arrayBuffer();
-	const gifBytes = new Uint8Array(buffer);
 	if (gifBytes.length > gifLen) {
 		alert(`GIF is too large for memory (${gifBytes.length} > ${gifLen} bytes).`);
 		return;
@@ -307,57 +388,11 @@ async function loadGifToVga(file: File): Promise<void> {
 	vgaBuffer.fill(0);
 	renderVga();
 
-	if (!("ImageDecoder" in window)) {
-		alert("This browser does not support ImageDecoder for GIF playback.");
-		return;
-	}
-
-	const decoder = new ImageDecoder({ data: buffer, type: "image/gif" });
 	if (vgaStatus) {
-		vgaStatus.textContent = "Playing GIF...";
-	}
-	await decoder.tracks.ready;
-	const frameCount = decoder.tracks.selectedTrack.frameCount || 1;
-	const offscreen = document.createElement("canvas");
-	offscreen.width = VGA_WIDTH;
-	offscreen.height = VGA_HEIGHT;
-	const offCtx = offscreen.getContext("2d");
-	if (!offCtx) {
-		alert("Unable to create GIF decoder canvas.");
-		return;
+		vgaStatus.textContent = "Running GIF via CPU...";
 	}
 
-	const frames: { data: Uint8ClampedArray; delay: number }[] = [];
-	for (let i = 0; i < frameCount; i++) {
-		const result = await decoder.decode({ frameIndex: i });
-		const frame = result.image;
-		const frameWidth = frame.displayWidth || VGA_WIDTH;
-		const frameHeight = frame.displayHeight || VGA_HEIGHT;
-		const scale = Math.min(VGA_WIDTH / frameWidth, VGA_HEIGHT / frameHeight);
-		const drawWidth = Math.round(frameWidth * scale);
-		const drawHeight = Math.round(frameHeight * scale);
-		const offsetX = Math.round((VGA_WIDTH - drawWidth) / 2);
-		const offsetY = Math.round((VGA_HEIGHT - drawHeight) / 2);
-		offCtx.clearRect(0, 0, VGA_WIDTH, VGA_HEIGHT);
-		offCtx.drawImage(frame, offsetX, offsetY, drawWidth, drawHeight);
-		const imageData = offCtx.getImageData(0, 0, VGA_WIDTH, VGA_HEIGHT);
-		const duration = typeof frame.duration === "number" ? frame.duration : 100000;
-		frames.push({ data: new Uint8ClampedArray(imageData.data), delay: Math.max(20, duration / 1000) });
-		frame.close();
-	}
-	decoder.close();
-
-	stopVgaPlayback();
-	let frameIndex = 0;
-	const playFrame = () => {
-		if (!vgaBuffer || !vgaCanvas || !vgaCtx || !vgaImageData || !vgaVisible()) return;
-		const frame = frames[frameIndex];
-		vgaBuffer.set(frame.data.subarray(0, vgaBuffer.length));
-		renderVga();
-		frameIndex = (frameIndex + 1) % frames.length;
-		vgaTimer = window.setTimeout(playFrame, frame.delay);
-	};
-	playFrame();
+	gifAutoCancel = startAutoRun(setWasmRuntime, renderVga, 5000);
 }
 
 function handleGifInput(event: Event): void {

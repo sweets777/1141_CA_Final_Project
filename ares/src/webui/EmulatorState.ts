@@ -15,6 +15,8 @@ export const DATA_BASE = 0x10000000;
 export const STACK_TOP = 0x7FFFF000;
 export const STACK_LEN = 4096;
 export const DATA_END = 0x70000000;
+export const GIF_BASE = 0x50000000;
+export const GIF_END = 0x50000000 + 4 * 1024 * 1024;
 
 export function convertNumber(x: number, decimal: boolean): string {
 	let ptr = false;
@@ -22,6 +24,7 @@ export function convertNumber(x: number, decimal: boolean): string {
 		if (x >= TEXT_BASE && x <= TEXT_END) ptr = true;
 		else if (x >= STACK_TOP - STACK_LEN && x <= STACK_TOP) ptr = true;
 		else if (x >= DATA_BASE && x <= DATA_END) ptr = true;
+		else if (x >= GIF_BASE && x <= GIF_END) ptr = true;
 		if (ptr) return "0x" + (toUnsigned(x).toString(16).padStart(8, "0"));
 		else return toUnsigned(x).toString();
 	} else {
@@ -175,6 +178,54 @@ function updateReactiveState(setRuntime) {
 			version: globalVersion++
 		});
 	}
+}
+
+function updateRunningState(setRuntime) {
+	setRuntime({
+		status: "running",
+		consoleText: wasmInterface.textBuffer,
+		pc: wasmInterface.pc?.[0] ?? TEXT_BASE,
+		regs: [...wasmInterface.regsArr?.slice(0, 31) ?? initialRegs],
+		version: globalVersion++
+	});
+}
+
+export function startAutoRun(setRuntime, onTick?: () => void, instructionsPerTick: number = 5000): () => void {
+	let cancelled = false;
+	const tick = () => {
+		if (cancelled) return;
+		let steps = 0;
+		while (steps < instructionsPerTick) {
+			wasmInterface.run();
+			if (wasmInterface.successfulExecution || wasmInterface.hasError) break;
+			steps++;
+		}
+		if (wasmInterface.successfulExecution) {
+			const needsNewline =
+				wasmInterface.textBuffer.length &&
+				wasmInterface.textBuffer[wasmInterface.textBuffer.length - 1] != "\n";
+			wasmInterface.textBuffer +=
+				needsNewline
+					? "\nExecuted successfully."
+					: "Executed successfully.";
+			updateReactiveState(setRuntime);
+			if (onTick) onTick();
+			return;
+		}
+		if (wasmInterface.hasError) {
+			updateReactiveState(setRuntime);
+			if (onTick) onTick();
+			return;
+		}
+		updateRunningState(setRuntime);
+		if (onTick) onTick();
+		requestAnimationFrame(tick);
+	};
+	updateRunningState(setRuntime);
+	requestAnimationFrame(tick);
+	return () => {
+		cancelled = true;
+	};
 }
 
 export async function buildAsm(_runtime: RuntimeState, setRuntime): Promise<void> {
