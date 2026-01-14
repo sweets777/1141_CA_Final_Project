@@ -284,17 +284,22 @@ void do_syscall(u32 inst_len) {
             putchar(((param >> i) & 1) ? '1' : '0');
         }
     } else if (g_regs[17] == GIF_STRIP_SYSCALL) {
-        u32 body_ptr = 0;
-        u32 body_len = 0;
-        if (gif_strip_header(&body_ptr, &body_len)) {
-            g_gif_body_ptr = body_ptr;
-            g_gif_body_len = body_len;
+        if (g_gif_body_ptr != 0 && g_gif_body_len != 0) {
+            g_regs[10] = g_gif_body_ptr;
+            g_regs[11] = g_gif_body_len;
         } else {
-            g_gif_body_ptr = 0;
-            g_gif_body_len = 0;
+            u32 body_ptr = 0;
+            u32 body_len = 0;
+            if (gif_strip_header(&body_ptr, &body_len)) {
+                g_gif_body_ptr = body_ptr;
+                g_gif_body_len = body_len;
+            } else {
+                g_gif_body_ptr = 0;
+                g_gif_body_len = 0;
+            }
+            g_regs[10] = g_gif_body_ptr;
+            g_regs[11] = g_gif_body_len;
         }
-        g_regs[10] = g_gif_body_ptr;
-        g_regs[11] = g_gif_body_len;
         g_reg_written = 11;
     } else if (g_regs[17] == 93 || g_regs[17] == 7 || g_regs[17] == 10) {
         emu_exit();

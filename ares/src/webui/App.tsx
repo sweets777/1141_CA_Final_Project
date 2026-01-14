@@ -394,8 +394,50 @@ async function loadGifToVga(file: File): Promise<void> {
 		return;
 	}
 
-	wasmInterface.createU8(gifPtr).set(gifBytes);
+	if (!("ImageDecoder" in window)) {
+		alert("This browser does not support ImageDecoder for GIF playback.");
+		return;
+	}
+
+	const decoder = new ImageDecoder({ data: buffer, type: "image/gif" });
+	await decoder.tracks.ready;
+	const result = await decoder.decode({ frameIndex: 0 });
+	const frame = result.image;
+	const frameWidth = frame.displayWidth || VGA_WIDTH;
+	const frameHeight = frame.displayHeight || VGA_HEIGHT;
+	const scale = Math.min(VGA_WIDTH / frameWidth, VGA_HEIGHT / frameHeight);
+	const drawWidth = Math.round(frameWidth * scale);
+	const drawHeight = Math.round(frameHeight * scale);
+	const offsetX = Math.round((VGA_WIDTH - drawWidth) / 2);
+	const offsetY = Math.round((VGA_HEIGHT - drawHeight) / 2);
+	const offscreen = document.createElement("canvas");
+	offscreen.width = VGA_WIDTH;
+	offscreen.height = VGA_HEIGHT;
+	const offCtx = offscreen.getContext("2d");
+	if (!offCtx) {
+		alert("Unable to create GIF decoder canvas.");
+		return;
+	}
+	offCtx.clearRect(0, 0, VGA_WIDTH, VGA_HEIGHT);
+	offCtx.drawImage(frame, offsetX, offsetY, drawWidth, drawHeight);
+	const imageData = offCtx.getImageData(0, 0, VGA_WIDTH, VGA_HEIGHT);
+	const rgbaBytes = new Uint8Array(imageData.data);
+	frame.close();
+	decoder.close();
+
+	const decodeOffset = (gifBytes.length + 3) & ~3;
+	if (decodeOffset + rgbaBytes.length > gifLen) {
+		alert("Decoded frame does not fit in GIF memory.");
+		return;
+	}
+
+	const gifBuffer = wasmInterface.createU8(gifPtr);
+	gifBuffer.set(gifBytes);
+	gifBuffer.set(rgbaBytes, decodeOffset);
+	const gifBase = wasmInterface.gifBase?.[0] ?? 0;
 	if (wasmInterface.gifUsed) wasmInterface.gifUsed[0] = gifBytes.length;
+	if (wasmInterface.gifBodyPtr) wasmInterface.gifBodyPtr[0] = gifBase + decodeOffset;
+	if (wasmInterface.gifBodyLen) wasmInterface.gifBodyLen[0] = rgbaBytes.length;
 
 	vgaBuffer = wasmInterface.createU8(vgaPtr).subarray(0, vgaLen);
 	vgaBuffer.fill(0);
