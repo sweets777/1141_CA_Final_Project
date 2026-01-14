@@ -35,7 +35,7 @@ interface WasmExports {
   g_gif_body_len: number;
 }
 
-const INSTRUCTION_LIMIT: number = 100 * 1000;
+const INSTRUCTION_LIMIT: number = 1000 * 1000;
 
 export class WasmInterface {
   private memory: WebAssembly.Memory;

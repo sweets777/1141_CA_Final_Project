@@ -321,15 +321,28 @@ _start:
 	bltu s1, s3, len_ok
 	mv s1, s3
 len_ok:
+	andi s4, s1, -4
 	li t0, 0
-copy_loop:
-	beq t0, s1, done
+word_loop:
+	beq t0, s4, tail
+	lw t1, 0(s0)
+	sw t1, 0(s2)
+	addi s0, s0, 4
+	addi s2, s2, 4
+	addi t0, t0, 4
+	j word_loop
+tail:
+	beq s4, s1, done
+	sub t2, s1, s4
+	li t3, 0
+tail_loop:
+	beq t3, t2, done
 	lbu t1, 0(s0)
 	sb t1, 0(s2)
 	addi s0, s0, 1
 	addi s2, s2, 1
-	addi t0, t0, 1
-	j copy_loop
+	addi t3, t3, 1
+	j tail_loop
 done:
 	li a7, 93
 	li a0, 0
