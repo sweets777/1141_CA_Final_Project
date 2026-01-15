@@ -24,7 +24,7 @@ import { RegisterTable } from "./RegisterTable";
 import { MemoryView } from "./MemoryView";
 import { PaneResize } from "./PaneResize";
 import { githubLight, githubDark, Theme, Colors, githubHighlightStyle } from './GithubTheme'
-import { AsmErrState, buildAsm, continueStep, DebugState, ErrorState, fetchTestcases, getCurrentLine, IdleState, initialRegs, nextStep, quitDebug, RunningState, runNormal, runTestSuite, setWasmRuntime, singleStep, startAutoRun, startStep, startStepTestSuite, StoppedState, testData, TestSuiteState, TestSuiteTableEntry, TEXT_BASE, wasmInterface, wasmRuntime, wasmTestsuite, wasmTestsuiteIdx } from "./EmulatorState";
+import { AsmErrState, buildAsm, continueStep, DebugState, ErrorState, fetchTestcases, getCurrentLine, IdleState, initialRegs, nextStep, pipelineIfLine, quitDebug, RunningState, runNormal, runTestSuite, setPipelineTrackingEnabled, setWasmRuntime, singleStep, startAutoRun, startStep, startStepTestSuite, StoppedState, testData, TestSuiteState, TestSuiteTableEntry, TEXT_BASE, wasmInterface, wasmRuntime, wasmTestsuite, wasmTestsuiteIdx } from "./EmulatorState";
 import { highlightTree } from "@lezer/highlight";
 
 let parserWithMetadata = parser.configure({
@@ -222,6 +222,7 @@ function stopVgaPlayback(): void {
 		gifAutoCancel();
 		gifAutoCancel = null;
 	}
+	setPipelineTrackingEnabled(true);
 }
 
 function initVgaCanvas(): boolean {
@@ -522,6 +523,7 @@ async function loadGifToVga(file: File): Promise<void> {
 		vgaStatus.textContent = "Running GIF via CPU...";
 	}
 
+	setPipelineTrackingEnabled(false);
 	gifAutoCancel = startAutoRun(setWasmRuntime, renderVga, 5000, true);
 }
 
@@ -757,10 +759,17 @@ const Editor: Component = () => {
 		let lineno = 0;
 		if (wasmRuntime.status == "debug" || wasmRuntime.status == "error") {
 			lineno = getCurrentLine(wasmRuntime);
+		} else {
+			lineno = pipelineIfLine();
 		}
 		if (!view) return;
+		const effects = [lineHighlightEffect.of(lineno)];
+		if (lineno > 0 && lineno <= view.state.doc.lines) {
+			const line = view.state.doc.line(lineno);
+			effects.push(EditorView.scrollIntoView(line.from, { y: "center" }));
+		}
 		view.dispatch({
-			effects: lineHighlightEffect.of(lineno), // disable the line highlight, as line numbering starts from 1 
+			effects
 		});
 	})
 

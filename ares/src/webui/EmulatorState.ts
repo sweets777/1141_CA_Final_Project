@@ -33,6 +33,8 @@ export function convertNumber(x: number, decimal: boolean): string {
 }
 
 export type ShadowEntry = { name: string; args: number[]; sp: number };
+export type PipelineStageSnapshot = { stage: string; pc: number | null };
+export type PipelineSnapshotEntry = { cycle: number; stages: PipelineStageSnapshot[] };
 
 export let breakpoints = new Set();
 
@@ -121,6 +123,23 @@ export let [wasmRuntime, setWasmRuntime] = createStore<RuntimeState>({ status: "
 export const wasmInterface = new WasmInterface();
 export let latestAsm = { text: "" };
 
+const pipelineDepth = 5;
+const pipelineStageNames = ["IF", "ID", "EX", "MEM", "WB"];
+export let [pipelineSnapshot, setPipelineSnapshot] = createSignal<PipelineStageSnapshot[]>(
+	pipelineStageNames.map((stage) => ({ stage, pc: null }))
+);
+export let [pipelineCycle, setPipelineCycle] = createSignal<number>(0);
+export let [pipelineIfLine, setPipelineIfLine] = createSignal<number>(0);
+export let [pipelineHistory, setPipelineHistory] = createSignal<PipelineSnapshotEntry[]>([]);
+let pipelineHistoryIndex = -1;
+let pipelineSlots: Array<number | null> = Array.from({ length: pipelineDepth }, () => null);
+let pipelineTrackingEnabled = true;
+let cycleSummaryAppended = false;
+
+export function setPipelineTrackingEnabled(enabled: boolean): void {
+	pipelineTrackingEnabled = enabled;
+}
+
 // TODO: cleanup
 function setBreakpoints(): void {
 	breakpoints = new Set();
@@ -149,8 +168,108 @@ function buildShadowStack() {
 	return st;
 }
 
+function resetPipeline(): void {
+	pipelineSlots = Array.from({ length: pipelineDepth }, () => null);
+	const emptyStages = pipelineStageNames.map((stage) => ({ stage, pc: null }));
+	setPipelineSnapshot(emptyStages);
+	setPipelineCycle(0);
+	setPipelineIfLine(0);
+	setPipelineHistory([]);
+	pipelineHistoryIndex = -1;
+	cycleSummaryAppended = false;
+}
+
+function getLineForPc(pc: number | null): number {
+	if (!pc) return 0;
+	const textByLinenum = wasmInterface.textByLinenum;
+	const len = wasmInterface.textByLinenumLen?.[0] ?? 0;
+	if (!textByLinenum || len === 0) return 0;
+	const linenoIdx = (pc - TEXT_BASE) / 2;
+	if (linenoIdx < 0 || linenoIdx >= len) return 0;
+	return textByLinenum[linenoIdx];
+}
+
+function setPipelineFromEntry(entry: PipelineSnapshotEntry): void {
+	setPipelineSnapshot(entry.stages);
+	setPipelineCycle(entry.cycle);
+	setPipelineIfLine(getLineForPc(entry.stages[0]?.pc ?? null));
+}
+
+function advancePipeline(pc: number): void {
+	if (!pc) return;
+	const nextCycle = pipelineCycle() + 1;
+	pipelineSlots = [pc, ...pipelineSlots.slice(0, pipelineDepth - 1)];
+	const stages = pipelineStageNames.map((stage, index) => ({
+		stage,
+		pc: pipelineSlots[index]
+	}));
+	const entry: PipelineSnapshotEntry = { cycle: nextCycle, stages };
+	setPipelineHistory((prev) => {
+		const trimmed = prev.slice(0, pipelineHistoryIndex + 1);
+		const updated = [...trimmed, entry];
+		pipelineHistoryIndex = updated.length - 1;
+		return updated;
+	});
+	setPipelineFromEntry(entry);
+}
+
+function appendCycleSummary(): void {
+	if (cycleSummaryAppended) return;
+	const suffix = wasmInterface.textBuffer.endsWith("\n") || wasmInterface.textBuffer.length === 0 ? "" : "\n";
+	wasmInterface.textBuffer += `${suffix}Cycles: ${pipelineCycle()}`;
+	cycleSummaryAppended = true;
+}
+
+function runCpuStep(): void {
+	const pcBefore = wasmInterface.pc?.[0] ?? 0;
+	wasmInterface.run();
+	if (pipelineTrackingEnabled) {
+		advancePipeline(pcBefore);
+	}
+}
+
+export async function stepPipelineCycle(_runtime: RuntimeState, setRuntime): Promise<void> {
+	if (_runtime.status === "testsuite" || _runtime.status === "error" || _runtime.status === "stopped") {
+		return;
+	}
+	if (_runtime.status === "idle" || _runtime.status === "asmerr") {
+		await buildAsm(_runtime, setRuntime);
+		if (wasmRuntime.status === "asmerr") {
+			forceLinting(view);
+			return;
+		}
+		updateRunningState(setRuntime);
+	}
+	if (pipelineHistoryIndex < pipelineHistory().length - 1) {
+		pipelineHistoryIndex += 1;
+		setPipelineFromEntry(pipelineHistory()[pipelineHistoryIndex]);
+		updateRunningState(setRuntime);
+		return;
+	}
+	runCpuStep();
+	if (wasmInterface.successfulExecution || wasmInterface.hasError) {
+		updateReactiveState(setRuntime);
+	} else {
+		updateRunningState(setRuntime);
+	}
+}
+
+export function stepPipelineBack(): void {
+	if (pipelineHistoryIndex <= 0) return;
+	pipelineHistoryIndex -= 1;
+	setPipelineFromEntry(pipelineHistory()[pipelineHistoryIndex]);
+}
+
+export function getInstructionText(pc: number | null): string {
+	if (!pc || !view) return "—";
+	const lineNumber = getLineForPc(pc);
+	if (lineNumber <= 0 || lineNumber > view.state.doc.lines) return "—";
+	return view.state.doc.line(lineNumber).text.trim() || "—";
+}
+
 function updateReactiveState(setRuntime) {
 	if (wasmInterface.hasError) {
+		appendCycleSummary();
 		const st = buildShadowStack();
 		setRuntime({
 			status: "error",
@@ -161,6 +280,7 @@ function updateReactiveState(setRuntime) {
 			version: globalVersion++
 		});
 	} else if (wasmInterface.successfulExecution) {
+		appendCycleSummary();
 		setRuntime({
 			status: "stopped",
 			consoleText: wasmInterface.textBuffer,
@@ -204,7 +324,7 @@ export function startAutoRun(
 		}
 		let steps = 0;
 		while (steps < instructionsPerTick) {
-			wasmInterface.run();
+			runCpuStep();
 			if (wasmInterface.successfulExecution || wasmInterface.hasError) break;
 			steps++;
 		}
@@ -249,6 +369,7 @@ export async function buildAsm(_runtime: RuntimeState, setRuntime): Promise<void
 		});
 	} else {
 		console.log("here");
+		resetPipeline();
 		if (_runtime.status != "stopped" || asm != latestAsm.text) setRuntime({ status: "idle", version: globalVersion++ });
 	}
 	latestAsm.text = asm;
@@ -270,7 +391,7 @@ export async function runNormal(_runtime: RuntimeState, setRuntime): Promise<voi
 
 	// run loop
 	while (true) {
-		wasmInterface.run();
+		runCpuStep();
 		if (wasmInterface.successfulExecution || wasmInterface.hasError) break;
 	}
 	if (wasmInterface.successfulExecution) {
@@ -301,6 +422,7 @@ export async function buildWithTestcase(_runtime: RuntimeState, setRuntime, suff
 		});
 	} else {
 		console.log("here");
+		resetPipeline();
 		if (_runtime.status != "stopped" || asm != latestAsm.text) setRuntime({ status: "idle", version: globalVersion++ });
 	}
 	latestAsm.text = asm;
@@ -331,7 +453,7 @@ export async function runTestSuite(_runtime: RuntimeState, setRuntime): Promise<
 
 		// run loop
 		while (true) {
-			wasmInterface.run();
+			runCpuStep();
 			if (wasmInterface.successfulExecution || wasmInterface.hasError) break;
 		}
 		if (wasmInterface.successfulExecution && _runtime.status == "running") {
@@ -390,7 +512,7 @@ export async function startStepTestSuite(_runtime: RuntimeState, setRuntime, ind
 
 	// run instructions until you hit user code
 	while (true) {
-		wasmInterface.run();
+		runCpuStep();
 		let linenoIdx = (wasmInterface.pc[0] - TEXT_BASE) / 2;
 		if (linenoIdx < wasmInterface.textByLinenumLen[0]) {
 			if (wasmInterface.textByLinenum[linenoIdx] < view.state.doc.lines) break;
@@ -403,7 +525,7 @@ export async function startStepTestSuite(_runtime: RuntimeState, setRuntime, ind
 
 export function singleStep(_runtime: DebugState, setRuntime): void {
 	setBreakpoints();
-	wasmInterface.run();
+	runCpuStep();
 	updateReactiveState(setRuntime);
 }
 
@@ -413,7 +535,7 @@ let savedSp = 0;
 export function continueStep(_runtime: DebugState, setRuntime): void {
 	setBreakpoints();
 	while (true) {
-		wasmInterface.run();
+		runCpuStep();
 		if (temporaryBreakpoint === wasmInterface.pc[0] && savedSp === wasmInterface.regsArr[2 - 1]) {
 			temporaryBreakpoint = null;
 			break;

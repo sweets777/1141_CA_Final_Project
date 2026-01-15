@@ -1,7 +1,7 @@
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Component, createSignal, onMount, createEffect, For, Show } from "solid-js";
 import { TabSelector } from "./TabSelector";
-import { DATA_BASE, GIF_BASE, shadowStackAugmented, ShadowStackAugmentedEnt, STACK_LEN, STACK_TOP, TEXT_BASE, wasmRuntime } from "./EmulatorState";
+import { DATA_BASE, GIF_BASE, getInstructionText, pipelineCycle, pipelineSnapshot, shadowStackAugmented, ShadowStackAugmentedEnt, STACK_LEN, STACK_TOP, stepPipelineBack, stepPipelineCycle, TEXT_BASE, wasmRuntime, setWasmRuntime } from "./EmulatorState";
 const ROW_HEIGHT: number = 24;
 
 export const MemoryView: Component<{ version: () => any, writeAddr: number, writeLen: number, sp: number, load: (addr: number, pow: number) => number | null }> = (props) => {
@@ -48,6 +48,7 @@ export const MemoryView: Component<{ version: () => any, writeAddr: number, writ
     });
 
     const [activeTab, setActiveTab] = createSignal(".text");
+    const pipelineTab = "five stage pipeline";
 
     // stack starts at the end, others at the start
     createEffect(() => {
@@ -71,16 +72,13 @@ export const MemoryView: Component<{ version: () => any, writeAddr: number, writ
     // FIXME: selecting data should not also select the address column
     return (
         <div class="h-full flex flex-col" style={{ contain: "strict" }} onMouseDown={(e) => { setAddrSelect(-1); }}>
-            <TabSelector tab={activeTab()} setTab={setActiveTab} tabs={[".text", ".data", ".gif", "stack", "frames"]} />
+            <TabSelector tab={activeTab()} setTab={setActiveTab} tabs={[".text", ".data", ".gif", "stack", pipelineTab]} />
             <div ref={parentRef} class="font-mono text-lg overflow-auto theme-scrollbar ml-2">
                 <div ref={dummyChunk} class="invisible absolute ">{"000000000"}</div>
-                <Show when={activeTab() == "frames"}>
-                    <ShadowStack
-                        shadowStackAugmented={(wasmRuntime.status == "debug" || wasmRuntime.status == "error")
-                            ? shadowStackAugmented(wasmRuntime.shadowStack, props.load, props.writeAddr, props.writeLen) : []}
-                        version={props.version} />
+                <Show when={activeTab() == pipelineTab}>
+                    <PipelineView />
                 </Show>
-                <Show when={activeTab() != "frames"}>
+                <Show when={activeTab() != pipelineTab}>
                     <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: "100%", position: "relative" }}>
                         <For each={rowVirtualizer.getVirtualItems()}>
                             {(virtRow) => (
@@ -121,6 +119,99 @@ export const MemoryView: Component<{ version: () => any, writeAddr: number, writ
                         </For>
                     </div>
                 </Show>
+            </div>
+        </div>
+    );
+};
+
+const PipelineView: Component = () => {
+    const stages = () => pipelineSnapshot();
+    let cycleHoldTimer: number | null = null;
+    let cycleHoldStart = 0;
+
+    const stopCycleHold = () => {
+        if (cycleHoldTimer !== null) {
+            clearTimeout(cycleHoldTimer);
+            cycleHoldTimer = null;
+        }
+    };
+
+    const runCycleStep = (direction: "next" | "prev") => {
+        if (direction === "next") {
+            void stepPipelineCycle(wasmRuntime, setWasmRuntime);
+        } else {
+            stepPipelineBack();
+        }
+    };
+
+    const getHoldDelay = (elapsedMs: number) => {
+        if (elapsedMs >= 6000) return 50;
+        if (elapsedMs >= 4000) return 100;
+        if (elapsedMs >= 2000) return 200;
+        return 400;
+    };
+
+    const scheduleHoldStep = (direction: "next" | "prev") => {
+        if (cycleHoldTimer === null) return;
+        const elapsed = performance.now() - cycleHoldStart;
+        const delay = getHoldDelay(elapsed);
+        cycleHoldTimer = window.setTimeout(() => {
+            runCycleStep(direction);
+            scheduleHoldStep(direction);
+        }, delay);
+    };
+
+    const startCycleHold = (direction: "next" | "prev") => {
+        stopCycleHold();
+        cycleHoldStart = performance.now();
+        cycleHoldTimer = window.setTimeout(() => {
+            runCycleStep(direction);
+            scheduleHoldStep(direction);
+        }, 400);
+    };
+
+    return (
+        <div class="p-3 text-base overflow-auto">
+            <div class="flex items-center justify-between mb-3">
+                <div class="font-semibold">Cycle: {pipelineCycle()}</div>
+                <div class="flex flex-col items-end gap-2">
+                    <button
+                        class="px-3 py-1 rounded theme-bg-hover theme-fg border theme-border"
+                        onClick={() => stepPipelineCycle(wasmRuntime, setWasmRuntime)}
+                        onPointerDown={(event) => {
+                            event.preventDefault();
+                            startCycleHold("next");
+                        }}
+                        onPointerUp={stopCycleHold}
+                        onPointerLeave={stopCycleHold}
+                        onPointerCancel={stopCycleHold}
+                    >
+                        Next cycle
+                    </button>
+                    <button
+                        class="px-3 py-1 rounded theme-bg-hover theme-fg border theme-border"
+                        onClick={() => stepPipelineBack()}
+                        onPointerDown={(event) => {
+                            event.preventDefault();
+                            startCycleHold("prev");
+                        }}
+                        onPointerUp={stopCycleHold}
+                        onPointerLeave={stopCycleHold}
+                        onPointerCancel={stopCycleHold}
+                    >
+                        Previous cycle
+                    </button>
+                </div>
+            </div>
+            <div class="flex flex-col gap-3">
+                <For each={stages()}>
+                    {(stage) => (
+                        <div class="border theme-border rounded p-3">
+                            <div class="font-semibold mb-2">{stage.stage}</div>
+                            <div class="theme-fg2 text-sm break-words">{getInstructionText(stage.pc)}</div>
+                        </div>
+                    )}
+                </For>
             </div>
         </div>
     );
