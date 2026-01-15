@@ -190,10 +190,18 @@ function updateRunningState(setRuntime) {
 	});
 }
 
-export function startAutoRun(setRuntime, onTick?: () => void, instructionsPerTick: number = 5000): () => void {
+export function startAutoRun(
+	setRuntime,
+	onTick?: () => void,
+	instructionsPerTick: number = 5000,
+	resetInstructionLimit: boolean = false
+): () => void {
 	let cancelled = false;
 	const tick = () => {
 		if (cancelled) return;
+		if (resetInstructionLimit) {
+			wasmInterface.instructions = 0;
+		}
 		let steps = 0;
 		while (steps < instructionsPerTick) {
 			wasmInterface.run();

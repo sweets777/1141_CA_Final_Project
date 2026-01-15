@@ -483,7 +483,7 @@ async function loadGifToVga(file: File): Promise<void> {
 		vgaStatus.textContent = "Running GIF via CPU...";
 	}
 
-	gifAutoCancel = startAutoRun(setWasmRuntime, renderVga, 5000);
+	gifAutoCancel = startAutoRun(setWasmRuntime, renderVga, 5000, true);
 }
 
 function handleGifInput(event: Event): void {
