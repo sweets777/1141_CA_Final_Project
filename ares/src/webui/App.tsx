@@ -315,34 +315,51 @@ _start:
 	ecall
 	beq a0, zero, done
 	mv s0, a0
-	mv s1, a1
-	la s2, _VGA_BASE
-	li s3, ${vgaSize}
-	bltu s1, s3, len_ok
-	mv s1, s3
+	lw s1, 0(s0)
+	lw s2, 4(s0)
+	addi s3, s0, 12
+	la s4, _GIF_BASE
+	la s5, _VGA_BASE
+	li s6, 0
+	li s7, ${vgaSize}
+frame_loop:
+	beq s1, zero, done
+	lw t0, 0(s3)
+	add t1, s4, t0
+	mv t2, s5
+	mv t3, s2
+	bltu t3, s7, len_ok
+	mv t3, s7
 len_ok:
-	andi s4, s1, -4
-	li t0, 0
+	andi t4, t3, -4
+	li t5, 0
 word_loop:
-	beq t0, s4, tail
-	lw t1, 0(s0)
-	sw t1, 0(s2)
-	addi s0, s0, 4
-	addi s2, s2, 4
-	addi t0, t0, 4
+	beq t5, t4, tail
+	lw t6, 0(t1)
+	sw t6, 0(t2)
+	addi t1, t1, 4
+	addi t2, t2, 4
+	addi t5, t5, 4
 	j word_loop
 tail:
-	beq s4, s1, done
-	sub t2, s1, s4
-	li t3, 0
+	beq t4, t3, frame_done
+	sub t0, t3, t4
+	li t5, 0
 tail_loop:
-	beq t3, t2, done
-	lbu t1, 0(s0)
-	sb t1, 0(s2)
-	addi s0, s0, 1
-	addi s2, s2, 1
-	addi t3, t3, 1
+	beq t5, t0, frame_done
+	lbu t6, 0(t1)
+	sb t6, 0(t2)
+	addi t1, t1, 1
+	addi t2, t2, 1
+	addi t5, t5, 1
 	j tail_loop
+frame_done:
+	addi s6, s6, 1
+	addi s3, s3, 4
+	bne s6, s1, frame_loop
+	li s6, 0
+	addi s3, s0, 12
+	j frame_loop
 done:
 	li a7, 93
 	li a0, 0
@@ -401,43 +418,62 @@ async function loadGifToVga(file: File): Promise<void> {
 
 	const decoder = new ImageDecoder({ data: buffer, type: "image/gif" });
 	await decoder.tracks.ready;
-	const result = await decoder.decode({ frameIndex: 0 });
-	const frame = result.image;
-	const frameWidth = frame.displayWidth || VGA_WIDTH;
-	const frameHeight = frame.displayHeight || VGA_HEIGHT;
-	const scale = Math.min(VGA_WIDTH / frameWidth, VGA_HEIGHT / frameHeight);
-	const drawWidth = Math.round(frameWidth * scale);
-	const drawHeight = Math.round(frameHeight * scale);
-	const offsetX = Math.round((VGA_WIDTH - drawWidth) / 2);
-	const offsetY = Math.round((VGA_HEIGHT - drawHeight) / 2);
+	const track = decoder.tracks.selectedTrack;
+	const frameCount = Math.max(1, track?.frameCount ?? 1);
+	const frameSize = VGA_WIDTH * VGA_HEIGHT * 4;
+	const tableOffset = (gifBytes.length + 3) & ~3;
+	const tableSize = 12 + frameCount * 4;
+	const frameDataOffset = (tableOffset + tableSize + 3) & ~3;
+	const totalSize = frameDataOffset + frameCount * frameSize;
+	if (totalSize > gifLen) {
+		decoder.close();
+		alert("Decoded frames do not fit in GIF memory.");
+		return;
+	}
+
 	const offscreen = document.createElement("canvas");
 	offscreen.width = VGA_WIDTH;
 	offscreen.height = VGA_HEIGHT;
 	const offCtx = offscreen.getContext("2d");
 	if (!offCtx) {
+		decoder.close();
 		alert("Unable to create GIF decoder canvas.");
 		return;
 	}
-	offCtx.clearRect(0, 0, VGA_WIDTH, VGA_HEIGHT);
-	offCtx.drawImage(frame, offsetX, offsetY, drawWidth, drawHeight);
-	const imageData = offCtx.getImageData(0, 0, VGA_WIDTH, VGA_HEIGHT);
-	const rgbaBytes = new Uint8Array(imageData.data);
-	frame.close();
-	decoder.close();
 
-	const decodeOffset = (gifBytes.length + 3) & ~3;
-	if (decodeOffset + rgbaBytes.length > gifLen) {
-		alert("Decoded frame does not fit in GIF memory.");
-		return;
+	const framesData = new Uint8Array(frameCount * frameSize);
+	for (let i = 0; i < frameCount; i++) {
+		const result = await decoder.decode({ frameIndex: i });
+		const frame = result.image;
+		const frameWidth = frame.displayWidth || VGA_WIDTH;
+		const frameHeight = frame.displayHeight || VGA_HEIGHT;
+		const scale = Math.min(VGA_WIDTH / frameWidth, VGA_HEIGHT / frameHeight);
+		const drawWidth = Math.round(frameWidth * scale);
+		const drawHeight = Math.round(frameHeight * scale);
+		const offsetX = Math.round((VGA_WIDTH - drawWidth) / 2);
+		const offsetY = Math.round((VGA_HEIGHT - drawHeight) / 2);
+		offCtx.clearRect(0, 0, VGA_WIDTH, VGA_HEIGHT);
+		offCtx.drawImage(frame, offsetX, offsetY, drawWidth, drawHeight);
+		const imageData = offCtx.getImageData(0, 0, VGA_WIDTH, VGA_HEIGHT);
+		framesData.set(imageData.data, i * frameSize);
+		frame.close();
 	}
+	decoder.close();
 
 	const gifBuffer = wasmInterface.createU8(gifPtr);
 	gifBuffer.set(gifBytes);
-	gifBuffer.set(rgbaBytes, decodeOffset);
+	const tableView = new DataView(gifBuffer.buffer, gifPtr + tableOffset, tableSize);
+	tableView.setUint32(0, frameCount, true);
+	tableView.setUint32(4, frameSize, true);
+	tableView.setUint32(8, 0, true);
+	for (let i = 0; i < frameCount; i++) {
+		tableView.setUint32(12 + i * 4, frameDataOffset + i * frameSize, true);
+	}
+	gifBuffer.set(framesData, frameDataOffset);
 	const gifBase = wasmInterface.gifBase?.[0] ?? 0;
 	if (wasmInterface.gifUsed) wasmInterface.gifUsed[0] = gifBytes.length;
-	if (wasmInterface.gifBodyPtr) wasmInterface.gifBodyPtr[0] = gifBase + decodeOffset;
-	if (wasmInterface.gifBodyLen) wasmInterface.gifBodyLen[0] = rgbaBytes.length;
+	if (wasmInterface.gifBodyPtr) wasmInterface.gifBodyPtr[0] = gifBase + tableOffset;
+	if (wasmInterface.gifBodyLen) wasmInterface.gifBodyLen[0] = tableSize;
 
 	vgaBuffer = wasmInterface.createU8(vgaPtr).subarray(0, vgaLen);
 	vgaBuffer.fill(0);
