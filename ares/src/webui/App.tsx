@@ -208,6 +208,10 @@ let vgaStatus: HTMLDivElement | null = null;
 let vgaTimer: number | null = null;
 let vgaBuffer: Uint8Array | null = null;
 let gifAutoCancel: (() => void) | null = null;
+let vgaWindow: HTMLDivElement | null = null;
+let vgaPositionInitialized = false;
+const [vgaPosition, setVgaPosition] = createSignal({ x: 0, y: 0 });
+let vgaDragOffset: { x: number; y: number } | null = null;
 
 function stopVgaPlayback(): void {
 	if (vgaTimer !== null) {
@@ -248,6 +252,13 @@ async function ensureVgaReady(): Promise<boolean> {
 	if (!vgaCanvas) {
 		await new Promise<void>((resolve) => setTimeout(resolve, 0));
 	}
+	if (!vgaPositionInitialized && vgaWindow) {
+		const rect = vgaWindow.getBoundingClientRect();
+		const x = Math.max(0, Math.round((window.innerWidth - rect.width) / 2));
+		const y = Math.max(0, Math.round((window.innerHeight - rect.height) / 2));
+		setVgaPosition({ x, y });
+		vgaPositionInitialized = true;
+	}
 	if (vgaCanvas && (!vgaCtx || !vgaImageData)) {
 		return initVgaCanvas();
 	}
@@ -263,6 +274,7 @@ function closeVgaWindow(): void {
 	setVgaVisible(false);
 	vgaCtx = null;
 	vgaImageData = null;
+	vgaPositionInitialized = false;
 	if (vgaStatus) {
 		vgaStatus.textContent = "Waiting for GIF...";
 	}
@@ -272,6 +284,33 @@ function renderVga(): void {
 	if (!vgaBuffer || !vgaCtx || !vgaImageData) return;
 	vgaImageData.data.set(vgaBuffer.subarray(0, vgaImageData.data.length));
 	vgaCtx.putImageData(vgaImageData, 0, 0);
+}
+
+function startVgaDrag(event: PointerEvent): void {
+	if (!vgaWindow) return;
+	event.preventDefault();
+	event.stopPropagation();
+	const rect = vgaWindow.getBoundingClientRect();
+	vgaDragOffset = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+	const handleMove = (moveEvent: PointerEvent) => {
+		if (!vgaDragOffset || !vgaWindow) return;
+		const bounds = vgaWindow.getBoundingClientRect();
+		const nextX = moveEvent.clientX - vgaDragOffset.x;
+		const nextY = moveEvent.clientY - vgaDragOffset.y;
+		const maxX = Math.max(0, window.innerWidth - bounds.width);
+		const maxY = Math.max(0, window.innerHeight - bounds.height);
+		setVgaPosition({
+			x: Math.min(Math.max(0, Math.round(nextX)), Math.round(maxX)),
+			y: Math.min(Math.max(0, Math.round(nextY)), Math.round(maxY))
+		});
+	};
+	const handleUp = () => {
+		vgaDragOffset = null;
+		window.removeEventListener("pointermove", handleMove);
+		window.removeEventListener("pointerup", handleUp);
+	};
+	window.addEventListener("pointermove", handleMove);
+	window.addEventListener("pointerup", handleUp);
 }
 
 function buildGifAssembly(): string {
@@ -932,11 +971,14 @@ const App: Component = () => {
 				class={`fixed inset-0 z-50 flex items-center justify-center bg-black/60 ${vgaVisible() ? "" : "hidden"}`}
 				on:click={closeVgaWindow}
 			>
-				<div
-					class="theme-bg theme-fg border theme-border rounded-lg p-4"
-					on:click={(event) => event.stopPropagation()}
-				>
-					<div class="flex items-center justify-between mb-2">
+			<div
+				ref={vgaWindow}
+				class="theme-bg theme-fg border theme-border rounded-lg p-4"
+				style={{ position: "absolute", left: `${vgaPosition().x}px`, top: `${vgaPosition().y}px` }}
+				on:click={(event) => event.stopPropagation()}
+			>
+				<div class="flex items-center justify-between mb-2 cursor-move" onPointerDown={startVgaDrag}>
+
 						<div class="font-semibold">ARES VGA</div>
 						<button
 							on:click={closeVgaWindow}
