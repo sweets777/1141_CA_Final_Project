@@ -24,6 +24,7 @@ import { RegisterTable } from "./RegisterTable";
 import { MemoryView } from "./MemoryView";
 import { PaneResize } from "./PaneResize";
 import { githubLight, githubDark, Theme, Colors, githubHighlightStyle } from './GithubTheme'
+import gifBoxIcon from "./assets/gif-box.png";
 import { AsmErrState, buildAsm, continueStep, DebugState, ErrorState, fetchTestcases, getCurrentLine, IdleState, initialRegs, nextStep, pipelineIfLine, quitDebug, RunningState, runNormal, runTestSuite, setPipelineTrackingEnabled, setWasmRuntime, singleStep, startAutoRun, startStep, startStepTestSuite, StoppedState, testData, TestSuiteState, TestSuiteTableEntry, TEXT_BASE, wasmInterface, wasmRuntime, wasmTestsuite, wasmTestsuiteIdx } from "./EmulatorState";
 import { highlightTree } from "@lezer/highlight";
 
@@ -159,12 +160,14 @@ const localStorageKey = window.testsuiteName ? ("savedtext-" + window.testsuiteN
 
 window.addEventListener("DOMContentLoaded", () => {
 	updateCss(currentTheme.colors);
+	document.documentElement.dataset.theme = currentTheme === githubDark ? "dark" : "light";
 });
 
 function changeTheme(theme: Theme): void {
 	// TODO: the theme reconfigure would be unnecessary if i just have all the styles in one place
 	view.dispatch({ effects: cmTheme.reconfigure(theme.cmTheme) });
 	updateCss(theme.colors);
+	document.documentElement.dataset.theme = theme === githubDark ? "dark" : "light";
 }
 
 function getDefaultTheme() {
@@ -618,10 +621,14 @@ const Navbar: Component = () => {
 					</Show>
 					<button
 						on:click={openGifPicker}
-						class="cursor-pointer flex-0-shrink flex material-symbols-outlined theme-fg theme-bg-hover theme-bg-active"
+						class="cursor-pointer flex-0-shrink flex items-center justify-start theme-bg-hover theme-bg-active w-[24px] pr-[2px]"
 						title="Load GIF to VGA"
 					>
-						<span class="text-[18px] leading-none">gif_box</span>
+						<img
+							src={gifBoxIcon}
+							alt="Load GIF"
+							class="w-[20px] h-[20px] gif-box-icon"
+						/>
 					</button>
 					<input
 						ref={gifInputRef}

@@ -38,3 +38,11 @@
     height: 100vh;
   }
 }
+
+.gif-box-icon {
+  display: block;
+}
+
+:root[data-theme="dark"] .gif-box-icon {
+  filter: invert(1);
+}
