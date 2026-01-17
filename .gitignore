@@ -60,6 +60,7 @@ Mkfile.old
 dkms.conf
 
 /ares
+!/ares/src/webui/assets/gif-box.png
 /ares_test
 /ares_afl
 /ares_libfuzzer
